@@ -1,7 +1,9 @@
 import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, isAbsolute, relative } from "node:path";
+import { threadPermissionOverrides } from "./agent-settings.mjs";
 import { check, requestID, now } from "./config.mjs";
+import { EMPTY_THREAD_NAME } from "./thread-titles.mjs";
 
 const skipped = new Set(["node_modules", "DerivedData", "vendor", "build", "dist", "Pods"]);
 export async function directoryPath(path) {
@@ -41,6 +43,15 @@ export class PathTabs {
   async directories(query = "", root) {
     check(query.length <= 200, "query", "検索語を短くしてください。");
     root = root ? await directoryPath(root) : await this.root();
+    if (!query.trim()) {
+      const entries = await readdir(root, { withFileTypes: true });
+      const children = entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".") &&
+        !skipped.has(entry.name) && !/[\x00-\x1f\x7f]/.test(entry.name))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      return { root, depth: 1, data: children.slice(0, 1000).map((entry) => ({
+        path: join(root, entry.name), name: entry.name, relative: entry.name,
+      })), truncated: children.length > 1000 };
+    }
     let index = this.index;
     if (!index || index.root !== root || now() - index.time > 30000) {
       const paths = [root], queue = [{ path: root, depth: 0 }];
@@ -80,9 +91,15 @@ export class PathTabs {
         if (result.data.some((v) => v.id === entry.threadId)) continue;
         try {
           const thread = await this.w.chat.readThread(c, entry.threadId);
-          result.data.unshift({ id: thread.id, name: thread.name ?? entry.name, preview: thread.preview ?? "", cwd: entry.directory, updatedAt: thread.updatedAt });
+          result.data.unshift({ id: thread.id, name: thread.name ?? null, preview: thread.preview ?? "", cwd: entry.directory, updatedAt: thread.updatedAt });
         } catch { /* Deleted external history is not recreated. */ }
       }
+    }
+    // Also repair conversations that have been switched away from or archived
+    // in Nock. Ordinary CLI history and custom names are left alone.
+    for (let i = 0; i < result.data.length; i++) {
+      try { result.data[i] = await this.w.titles.repair(c, result.data[i]); }
+      catch { /* History remains usable if Codex cannot save a name yet. */ }
     }
     return result;
   }
@@ -97,9 +114,30 @@ export class PathTabs {
       }
       const old = id ? this.w.records().find((t) => t.id === id) ?? this.w.snapshot.spaces.flatMap((s) => s.tabs).find((t) => t.id === id) : null;
       check(!id || old, "tab_missing", "タブが見つかりません。", 404);
+      // Opening a shared conversation selects its existing tab, even during a turn.
+      // Do not replace the current tab or create a second owner of the thread.
+      if (body.threadId) {
+        const target = this.w.records().find((t) => t.threadId === body.threadId && !t.archived);
+        if (target) {
+          if (body.directory) check(await directoryPath(body.directory) === await directoryPath(target.directory),
+            "thread_directory", "このパスの履歴を選んでください。", 409);
+          this.w.store.claim(body.requestId, key, kind, body);
+          await this.w.refreshLayout();
+          return this.w.store.finishRequest(body.requestId, "accepted", { tabId: target.id, threadId: target.threadId });
+        }
+      }
+      const permissionLevel = body.permissionLevel ?? old?.permissionLevel;
+      const permissions = threadPermissionOverrides(permissionLevel);
+      check(!old || !this.w.messageQueue?.list(id).length, "queue_busy", "キューの送信が終わるか、項目を削除してから会話を切り替えてください。", 409);
+      let space;
+      if (!old && body.spaceId) {
+        await this.w.refreshLayout();
+        space = this.w.snapshot.spaces.find((s) => s.id === body.spaceId);
+        check(space, "space_stale", "Spaceが見つかりません。再同期してください。", 409);
+      }
       check(!old || body.expectedThreadId === (old.threadId ?? null), "stale_thread", "会話が切り替わりました。再同期してください。", 409);
       check(!old || !this.w.chat.requests(id).length, "unknown_request", "送信結果を確認してから切り替えてください。", 409);
-      const directory = await directoryPath(body.directory ?? old?.directory ?? await this.root());
+      const directory = await directoryPath(body.directory ?? old?.directory ?? space?.directory ?? await this.root());
       const c = await this.w.shared(true);
       if (old?.threadId) {
         const thread = await this.w.chat.readThread(c, old.threadId);
@@ -118,11 +156,12 @@ export class PathTabs {
       }
       this.w.store.claim(body.requestId, key, kind, body);
       try {
-        if (thread) thread = (await c.call("thread/resume", { threadId: thread.id })).thread;
+        if (thread) thread = (await c.call("thread/resume", { threadId: thread.id, ...threadPermissionOverrides(body.permissionLevel) })).thread;
         else {
           thread = (await c.call("thread/start", { historyMode: "legacy", cwd: directory,
-            approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write" })).thread;
-          await c.call("thread/name/set", { threadId: thread.id, name: basename(directory) || directory });
+            ...permissions })).thread;
+          // A desktop TUI can attach before the first message is sent.
+          await c.call("thread/name/set", { threadId: thread.id, name: EMPTY_THREAD_NAME });
         }
         // Each path keeps its own shell. Switching never injects cd into an active
         // program, kills a process, or discards the previous shell's scrollback.
@@ -131,20 +170,24 @@ export class PathTabs {
         let pane = contexts.find((p) => p.directory === directory && panes.some((live) =>
           live.paneId === p.paneId && live.panePid === p.panePid && live.epoch === p.epoch && !live.dead));
         if (!pane) {
-          const paneId = await this.w.tmux.create({ name: `nock-${body.requestId.slice(0, 8)}`, directory });
+          const paneId = await this.w.tmux.create({ space: old?.sessionId ?? space?.sessionId,
+            name: `nock-${body.requestId.slice(0, 8)}`, directory });
           pane = (await this.w.tmux.panes()).find((p) => p.paneId === paneId);
         }
         check(pane, "terminal_unknown", "端末の作成結果を確認できません。", 503);
         const compact = ({ contexts, history, ...value }) => value;
         const history = [...(old?.history ?? []), ...(old?.threadId ? [{ threadId: old.threadId, directory: old.directory, name: old.name }] : [])]
           .filter((v, i, all) => all.findIndex((p) => p.threadId === v.threadId) === i);
-        const tab = { ...compact(pane), id: key, name: basename(directory) || directory, directory,
-          pathTab: true, threadId: thread.id, model: thread.model, effort: thread.reasoningEffort, history,
+        const siblings = this.w.records().filter((t) => t.sessionId === pane.sessionId && t.epoch === pane.epoch);
+        const tabNumber = old?.tabNumber ?? String(Math.max(0, ...siblings.map((t) => Number(t.tabNumber) || 0)) + 1);
+        const customName = old?.customName;
+        const tab = { ...compact(pane), id: key, name: customName ?? tabNumber, tabNumber, customName, directory,
+          pathTab: true, threadId: thread.id, permissionLevel: selectedThread ? body.permissionLevel ?? remembered?.permissionLevel ?? null : permissionLevel || null, model: thread.model, effort: thread.reasoningEffort, history,
           contexts: contexts.filter((p, i) => p.directory !== directory && contexts.findIndex((v) => v.directory === p.directory) === i).map(compact),
-          state: "idle", latest: "", archived: false, updatedAt: now(), lastPathRequest: body.requestId };
+          state: "idle", latest: "", lastUserQuery: null, runTiming: null, turnId: null, archived: false, updatedAt: now(), lastPathRequest: body.requestId };
         this.w.save(tab);
         const receipt = this.w.store.finishRequest(body.requestId, "accepted", { tabId: key, threadId: thread.id });
-        await this.w.refresh();
+        await this.w.refreshLayout();
         return receipt;
       } catch (e) {
         return this.w.store.finishRequest(body.requestId, e.code === "codex_rejected" ? "rejected" : "unknown", { message: e.message });

@@ -104,6 +104,7 @@ try {
         check(p, "pane", "現在のtmux端末を確認できません。");
         const r = await api("/v1/workspace/register", { requestId: randomUUID(), paneId: p.paneId, epoch: p.epoch, panePid: p.panePid });
         check(r.status === "accepted", "receipt", r.result?.message ?? "受理を確認できません。自動再実行しません。");
+        await tmux.enableScrollback(p);
         process.exitCode = spawnSync(config.codexBin, ["resume", "--no-alt-screen", "--remote", `unix://${r.result.socket}`, r.result.threadId], { stdio: "inherit" }).status ?? 1;
       } else {
         const requestId = randomUUID();
@@ -113,7 +114,8 @@ try {
         const w = await api("/v1/workspace");
         const t = w.spaces.flatMap((s) => s.tabs).find((t) => t.id === r.result.tabId);
         check(t, "pane", "作成済みの端末を再同期してください。");
-        process.exitCode = spawnSync(tmux.bin, [...(tmux.socket ? ["-S", tmux.socket] : []), "attach-session", "-t", t.paneId], { stdio: "inherit" }).status ?? 1;
+        const tmuxArgs = await tmux.desktopAttachArgs(t);
+        process.exitCode = spawnSync(tmux.bin, tmuxArgs, { stdio: "inherit" }).status ?? 1;
       }
     } else if (command === "connection-info") {
       // Sensitive machine-readable output, requested only across authenticated SSH.

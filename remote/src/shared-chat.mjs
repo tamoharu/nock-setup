@@ -2,8 +2,12 @@ import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import { check, requestID, textInput, now } from "./config.mjs";
 import { threadState } from "./workspace.mjs";
+import { permissionOverrides } from "./agent-settings.mjs";
+import { messageInput } from "./attachments.mjs";
+import { runTiming } from "./run-timing.mjs";
 
 // A second UI for the existing shared app-server thread; never forks a rollout.
 export class SharedChat {
@@ -33,9 +37,16 @@ export class SharedChat {
     const t = this.workspace.records().find((t) => t.threadId === threadId);
     if (!t) return;
     if (m.id !== undefined) {
+      if ([...this.approvals.values()].some((a) => a.client === client && a.rpcId === m.id)) return;
       const id = randomUUID();
       this.approvals.set(id, { id, sessionId: t.id, turnId: m.params.turnId ?? "", method: m.method,
-        params: m.params, status: "pending", blocking: true, rpcId: m.id, client });
+        params: m.params, status: "pending", blocking: m.params.isBlocking !== false, rpcId: m.id, client });
+      this.store.transaction(() => {
+        const event = this.store.event(t.id, "approval", { approvalId: id }, `shared-approval:${id}`);
+        this.workspace.save({ ...t, state: m.params.isBlocking === false ? t.state : "waiting", waitingSource: "approval", updatedAt: now() });
+        if (event && !(t.state === "waiting" && t.waitingSource === "status"))
+          this.store.enqueue(event, t, "waiting", basename(t.directory ?? "") || t.spaceName || "作業");
+      });
     } else if (m.method === "serverRequest/resolved") {
       for (const [id, a] of this.approvals)
         if (a.client === client && a.rpcId === m.params.requestId) this.approvals.delete(id);
@@ -67,6 +78,8 @@ export class SharedChat {
       session: { id, name: t.name, projectId: "", threadId: t.threadId,
         turnId: thread.turns?.at(-1)?.id ?? null, state: threadState(thread, t.state),
         model: thread.model ?? t.model ?? null, effort: thread.reasoningEffort ?? t.effort ?? null, mode: "default", error: thread.turns?.at(-1)?.error?.message ?? null,
+        permissionLevel: t.permissionLevel ?? null,
+        runTiming: runTiming(thread.turns?.at(-1), t.runTiming),
         archived: t.archived, latest: t.latest, updatedAt: t.updatedAt, createdAt: t.updatedAt, lastEventSeq: 0 },
       items: items.filter((i) => i.position < before).slice(-200),
       approvals: [...this.approvals.values()].filter((a) => a.sessionId === id && a.client === c && a.status === "pending")
@@ -83,12 +96,12 @@ export class SharedChat {
         this.store.claim(body.requestId, id, kind, body);
         return this.store.request(body.requestId);
       }
-      check(!t.pathTab || body.expectedThreadId === t.threadId, "stale_thread", "会話が切り替わりました。再同期してください。", 409);
+      check((!t.pathTab && body.expectedThreadId === undefined) || body.expectedThreadId === t.threadId, "stale_thread", "会話が切り替わりました。再同期してください。", 409);
       const c = await this.workspace.shared();
       check(c?.alive, "codex_offline", "共有Codexに再接続してください。", 503);
       let method, params, approval;
       if (action === "turns") {
-        textInput(body.text, 100000);
+        const input = messageInput(this.workspace.attachments, body, id, t.threadId);
         check(!this.requests(id).length, "unknown_request", "以前の指示の受理結果を履歴で確認してください。", 409);
         const thread = await this.readThread(c, t.threadId);
         check(!["running", "waiting", "unknown"].includes(threadState(thread, t.state)), "busy", "実行中の応答が終わるまでお待ちください。", 409);
@@ -99,8 +112,17 @@ export class SharedChat {
           check(!body.effort || model.supportedReasoningEfforts.some((e) => e.reasoningEffort === body.effort), "effort", "推論の強さを選び直してください。");
         } else check(!body.effort, "effort", "モデルを先に選んでください。");
         method = "turn/start";
-        params = { threadId: t.threadId, clientUserMessageId: body.requestId, input: [{ type: "text", text: body.text }],
+        params = { threadId: t.threadId, clientUserMessageId: body.requestId, input,
+          ...permissionOverrides(body.permissionLevel ?? t.permissionLevel),
           ...(body.model ? { model: body.model } : {}), ...(body.effort ? { effort: body.effort } : {}) };
+      } else if (action === "steer") {
+        check(!this.requests(id).length, "unknown_request", "以前の送信結果を確認してください。", 409);
+        const input = messageInput(this.workspace.attachments, body, id, t.threadId);
+        const thread = await this.readThread(c, t.threadId);
+        check(body.expectedTurnId && thread.turns?.at(-1)?.id === body.expectedTurnId && thread.status?.type === "active",
+          "stale_turn", "対象の応答は終了しています。通常送信またはキューを選んでください。", 409);
+        method = "turn/steer";
+        params = { threadId: t.threadId, expectedTurnId: body.expectedTurnId, clientUserMessageId: body.requestId, input };
       } else if (action === "interrupt") {
         const thread = await this.readThread(c, t.threadId);
         check(thread.turns?.at(-1)?.id === body.turnId && thread.status?.type === "active", "stale_turn", "この応答はすでに終了しています。", 409);
@@ -130,8 +152,9 @@ export class SharedChat {
           result = { answered: true };
         } else result = await c.call(method, params);
         if (action === "turns") this.workspace.save({ ...this.record(id), model: body.model ?? t.model,
+          permissionLevel: body.permissionLevel || t.permissionLevel,
           effort: body.effort ?? t.effort, updatedAt: now() });
-        return this.store.finishRequest(body.requestId, "accepted", { tabId: id, turnId: result.turn?.id });
+        return this.store.finishRequest(body.requestId, "accepted", { tabId: id, turnId: result.turn?.id ?? result.turnId });
       } catch (e) {
         return this.store.finishRequest(body.requestId, e.code === "codex_rejected" ? "rejected" : "unknown", { message: e.message });
       }
@@ -161,8 +184,10 @@ export async function readRolloutTurns(thread) {
         verified = true;
       }
       if (!verified || value.type !== "event_msg") continue;
+      const timestamp = Date.parse(value.timestamp);
+      const seconds = Number.isFinite(timestamp) ? timestamp / 1000 : null;
       if (p.type === "task_started") {
-        current = { id: p.turn_id ?? `rollout-turn-${lineNumber}`, status: "inProgress", items: [] };
+        current = { id: p.turn_id ?? `rollout-turn-${lineNumber}`, status: "inProgress", items: [], startedAt: seconds };
         turns.push(current);
       }
       if (["user_message", "agent_message"].includes(p.type)) {
@@ -170,8 +195,12 @@ export async function readRolloutTurns(thread) {
         current.items.push({ id: `rollout-${lineNumber}`, type: p.type === "user_message" ? "userMessage" : "agentMessage",
           text: p.message ?? "" });
       }
-      if (current && p.type === "task_complete") current.status = "completed";
-      if (current && p.type === "turn_aborted") current.status = "interrupted";
+      if (current && ["task_complete", "turn_aborted"].includes(p.type) && (!p.turn_id || current.id === p.turn_id)) {
+        current.status = p.type === "task_complete" ? "completed" : "interrupted";
+        current.completedAt = seconds;
+        if (current.startedAt !== null && current.startedAt !== undefined && seconds !== null)
+          current.durationMs = Math.max(0, (seconds - current.startedAt) * 1000);
+      }
     }
   } finally { lines.close(); input.destroy(); }
   return turns;

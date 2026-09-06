@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { authenticate, check, Fault, now, requestID } from "./config.mjs";
+import { weeklyUsage } from "./agent-settings.mjs";
 
 async function readJSON(req) {
   check(
@@ -31,6 +32,7 @@ async function readJSON(req) {
 }
 export function createAPI(service, worker, config) {
   const store = service.store;
+  if (service.workspace) service.workspace.messageQueue = service.queue;
   const server = createServer(async (req, res) => {
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
@@ -59,6 +61,7 @@ export function createAPI(service, worker, config) {
           protocol: 1,
           serverId: store.serverId,
           codexVersion: "0.153.4",
+          capabilities: { agentPermissions: true, messageQueue: true, steer: true, attachments: true, spaceManagement: true, codeBrowser: true },
           time: now(),
         };
       else if (req.method === "GET" && u.pathname === "/v1/sync") {
@@ -92,15 +95,23 @@ export function createAPI(service, worker, config) {
         });
       } else if (req.method === "GET" && u.pathname === "/v1/overview")
         value = { serverId: store.serverId, codexVersion: "0.153.4", projects: config.projects,
-          sessions: store.sessions(), notifications: worker.status(), workspace: await service.workspace?.refresh(), syncedAt: now() };
+          sessions: store.sessions(), notifications: worker.status(), workspace: await service.workspace?.refreshLayout(), syncedAt: now() };
       else if (req.method === "GET" && u.pathname === "/v1/workspace")
-        value = await service.workspace?.refresh();
+        value = await service.workspace?.refreshLayout();
       else if (req.method === "POST" && u.pathname === "/v1/workspace/tabs")
         value = await service.workspace?.create(body);
+      else if (req.method === "PATCH" && path.length === 4 && path[0] === "v1" && path[1] === "workspace" && path[2] === "spaces")
+        value = await service.workspace.updateSpace(decodeURIComponent(path[3]), body);
       else if (req.method === "GET" && u.pathname === "/v1/workspace/directories")
         value = await service.workspace.paths.directories(u.searchParams.get("q") ?? "", u.searchParams.get("root"));
       else if (req.method === "POST" && u.pathname === "/v1/workspace/path-tabs")
         value = await service.workspace.paths.mutate(null, body);
+      else if (req.method === "GET" && path.length === 5 && path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && ["files", "file"].includes(path[4])) {
+        const id = decodeURIComponent(path[3]), filePath = u.searchParams.get("path") ?? "", directory = u.searchParams.get("directory");
+        value = path[4] === "files"
+          ? await service.workspace.code.list(id, filePath, directory, u.searchParams.get("cursor") ?? "0")
+          : await service.workspace.code.read(id, filePath, directory);
+      }
       else if (path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && path[3] && path[4] === "context" && req.method === "POST")
         value = await service.workspace.paths.mutate(decodeURIComponent(path[3]), body);
       else if (path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && path[3] && path[4] === "history" && req.method === "GET")
@@ -115,16 +126,33 @@ export function createAPI(service, worker, config) {
           const before = Number(u.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
           check(Number.isSafeInteger(before) && before > 0, "cursor", "取得位置が不正です。");
           value = await service.workspace.chat.detail(id, before);
+          value.queuedMessages = service.queue?.list(id) ?? [];
+        } else if (req.method === "POST" && path[5] === "queue") value = service.queue.add(id, body, true);
+        else if (req.method === "DELETE" && path[5] === "queue" && path[6]) value = service.queue.remove(id, path[6]);
+        else if (req.method === "POST" && path[5] === "attachments") {
+          const target = service.workspace.chat.record(id);
+          check(body.expectedThreadId === target.threadId, "stale_thread", "会話が変更されました。", 409);
+          value = await service.attachments.begin(body, id, target.threadId);
         } else if (req.method === "POST") value = await service.workspace.chat.mutate(id, path[5], body, path[6]);
       }
       else if (req.method === "PATCH" && path[1] === "workspace" && path[2] === "tabs" && path[3])
-        value = service.workspace?.archive(decodeURIComponent(path[3]), body.archived);
+        value = body.name !== undefined
+          ? await service.workspace.rename(decodeURIComponent(path[3]), body.name)
+          : service.workspace?.archive(decodeURIComponent(path[3]), body.archived);
       else if (req.method === "GET" && u.pathname === "/v1/models")
         value = { models: await service.models() };
+      else if (req.method === "GET" && u.pathname === "/v1/account/weekly-usage") {
+        const c = await service.workspace.shared(true);
+        value = { weekly: weeklyUsage(await c.call("account/rateLimits/read", null, 8000)), fetchedAt: now() };
+      }
       else if (req.method === "POST" && u.pathname === "/v1/projects/reload")
         value = service.reloadProjects();
       else if (req.method === "POST" && u.pathname === "/v1/sessions")
         value = await service.create(body);
+      else if (req.method === "POST" && path[0] === "v1" && path[1] === "attachments" && path[2]) {
+        if (path[3] === "chunks") value = await service.attachments.chunk(path[2], body);
+        else if (path[3] === "complete") value = await service.attachments.complete(path[2]);
+      }
       else if (path[0] === "v1" && path[1] === "sessions" && path[2]) {
         const id = path[2];
         store.session(id);
@@ -138,8 +166,17 @@ export function createAPI(service, worker, config) {
             "取得位置が不正です。",
           );
           value = service.detail(id, before, 200);
+          value.queuedMessages = service.queue.list(id);
         } else if (req.method === "POST" && path[3] === "turns")
           value = await service.send(id, body);
+        else if (req.method === "POST" && path[3] === "steer") value = await service.steer(id, body);
+        else if (req.method === "POST" && path[3] === "queue") value = service.queue.add(id, body, false);
+        else if (req.method === "DELETE" && path[3] === "queue" && path[4]) value = service.queue.remove(id, path[4]);
+        else if (req.method === "POST" && path[3] === "attachments") {
+          const target = store.session(id);
+          check(body.expectedThreadId === target.threadId, "stale_thread", "会話が変更されました。", 409);
+          value = await service.attachments.begin(body, id, target.threadId);
+        }
         else if (req.method === "POST" && path[3] === "interrupt")
           value = await service.interrupt(id, body);
         else if (req.method === "POST" && path[3] === "approvals" && path[4])

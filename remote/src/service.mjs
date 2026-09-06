@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Codex, reconcileProcess } from "./codex.mjs";
+import { permissionOverrides, threadPermissionOverrides } from "./agent-settings.mjs";
+import { join } from "node:path";
+import { Attachments, messageInput } from "./attachments.mjs";
+import { MessageQueue } from "./message-queue.mjs";
+import { runTiming } from "./run-timing.mjs";
 import {
   now,
   check,
@@ -32,6 +37,8 @@ export class Service {
     this.locks = new Map();
     this.catalog = [];
     this.shuttingDown = false;
+    this.attachments = new Attachments(store, config.dataDir ? join(config.dataDir, "attachments") : null);
+    this.queue = new MessageQueue(this);
   }
   async lock(id, fn) {
     const previous = this.locks.get(id) ?? Promise.resolve();
@@ -132,9 +139,7 @@ export class Service {
       const r = await c.call("thread/resume", {
         threadId: s.threadId,
         cwd: this.project(s.projectId).path,
-        approvalPolicy: "on-request",
-        approvalsReviewer: "user",
-        sandbox: "workspace-write",
+        ...threadPermissionOverrides(s.permissionLevel),
       });
       this.importTurns(s.id, r.thread?.turns ?? []);
     }
@@ -197,6 +202,7 @@ export class Service {
         name: body.name,
         projectId: project.id,
         threadId: null,
+        permissionLevel: body.permissionLevel || null,
         state: "stopped",
         turnId: null,
         archived: false,
@@ -211,9 +217,7 @@ export class Service {
         const c = await this.client(s);
         const r = await c.call("thread/start", {
           cwd: project.path,
-          approvalPolicy: "on-request",
-          approvalsReviewer: "user",
-          sandbox: "workspace-write",
+          ...threadPermissionOverrides(body.permissionLevel),
         });
         this.change(this.store.session(id), {
           threadId: r.thread.id,
@@ -236,9 +240,30 @@ export class Service {
       }
     });
   }
+  async steer(id, body) {
+    requestID(body.requestId);
+    return this.lock(id, async () => {
+      const old = this.store.request(body.requestId);
+      if (old) { this.store.claim(body.requestId, id, "steer", body); return old; }
+      const s = this.store.session(id);
+      check(body.expectedThreadId === s.threadId, "stale_thread", "会話が変更されました。", 409);
+      check(body.expectedTurnId && body.expectedTurnId === s.turnId && busy(s), "stale_turn", "対象の応答は終了しています。", 409);
+      const c = this.clients.get(id);
+      check(c?.alive, "codex_offline", "実行中のCodexとの接続を確認してください。", 409);
+      check(!this.store.db.prepare("SELECT id FROM requests WHERE session=? AND kind IN ('turn','steer') AND status IN ('unknown','dispatching')").get(id),
+        "unknown_request", "以前の送信結果を確認してください。", 409);
+      const input = messageInput(this.attachments, body, id, s.threadId);
+      this.store.claim(body.requestId, id, "steer", body);
+      try {
+        const result = await c.call("turn/steer", { threadId: s.threadId, expectedTurnId: body.expectedTurnId, clientUserMessageId: body.requestId, input });
+        return this.store.finishRequest(body.requestId, "accepted", { sessionId: id, turnId: result.turnId });
+      } catch (e) {
+        return this.store.finishRequest(body.requestId, e.code === "codex_rejected" ? "rejected" : "unknown", { message: e.message });
+      }
+    });
+  }
   async send(id, body) {
     requestID(body.requestId);
-    textInput(body.text);
     return this.lock(id, async () => {
       const old = this.store.request(body.requestId);
       if (old) {
@@ -246,6 +271,8 @@ export class Service {
         return old;
       }
       let s = this.store.session(id);
+      check(!body.expectedThreadId || body.expectedThreadId === s.threadId, "stale_thread", "会話が変わりました。再同期してください。", 409);
+      const input = messageInput(this.attachments, body, id, s.threadId);
       check(
         s.threadId,
         "unmanaged",
@@ -261,7 +288,7 @@ export class Service {
       check(
         !this.store.db
           .prepare(
-            "SELECT id FROM requests WHERE session=? AND status='unknown' AND kind='turn'",
+            "SELECT id FROM requests WHERE session=? AND status='unknown' AND kind IN ('turn','steer')",
           )
           .get(id),
         "unknown_request",
@@ -269,6 +296,7 @@ export class Service {
         409,
       );
       await this.validateModel(body.model, body.effort);
+      const permissions = permissionOverrides(body.permissionLevel || s.permissionLevel);
       check(
         !body.mode || ["default", "plan"].includes(body.mode),
         "mode",
@@ -301,17 +329,19 @@ export class Service {
         this.store.claim(body.requestId, id, "turn", body);
         s = this.change(this.store.session(id), {
           state: "starting",
+          runTiming: null,
           error: null,
           pendingRequestId: body.requestId,
         });
       });
       try {
         const first = this.store.items(id).length === 0;
-        const text = first ? `${body.text}\n\n${resultHint}` : body.text;
+        if (first) input[0].text += `\n\n${resultHint}`;
         const r = await c.call("turn/start", {
+          ...permissions,
           threadId: s.threadId,
           clientUserMessageId: body.requestId,
-          input: [{ type: "text", text }],
+          input,
           ...(body.model ? { model: body.model } : {}),
           ...(body.effort ? { effort: body.effort } : {}),
           ...(collaborationMode ? { collaborationMode } : {}),
@@ -320,11 +350,12 @@ export class Service {
         this.change(current, {
           pendingRequestId: null,
           ...(current.state === "starting"
-            ? { state: "running", turnId: r.turn.id }
+            ? { state: "running", turnId: r.turn.id, runTiming: runTiming(r.turn, current.runTiming, { startedAt: now() }) }
             : {}),
           model: body.model || current.model,
           effort: body.effort || current.effort,
           mode: body.mode || current.mode || "default",
+          permissionLevel: body.permissionLevel || current.permissionLevel,
         });
         return this.store.finishRequest(body.requestId, "accepted", {
           sessionId: id,
@@ -539,6 +570,7 @@ export class Service {
         this.change(s, {
           state: "running",
           turnId: p.turn.id,
+          runTiming: runTiming(p.turn, s.runTiming, { startedAt: now() }),
           error: null,
           pendingRequestId: null,
         });
@@ -560,6 +592,7 @@ export class Service {
         s = this.change(this.store.session(id), {
           state,
           turnId: null,
+          runTiming: runTiming(p.turn, s.runTiming, { completedAt: now() }),
           error: p.turn.error?.message ?? null,
         });
         if (["completed", "failed"].includes(state))
@@ -662,6 +695,10 @@ export class Service {
   importTurns(id, turns) {
     for (const t of turns)
       for (const item of t.items ?? []) this.saveCodexItem(id, t.id, item);
+    if (turns.length) {
+      const s = this.store.session(id);
+      this.store.saveSession({ ...s, runTiming: runTiming(turns.at(-1), s.runTiming) });
+    }
   }
   closeSession(id, message) {
     this.store.transaction(() => {
@@ -756,6 +793,7 @@ export class Service {
   }
   close() {
     this.shuttingDown = true;
+    this.queue.close();
     for (const c of this.clients.values()) c.stop();
     this.controlClient?.stop();
   }

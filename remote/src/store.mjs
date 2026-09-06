@@ -27,6 +27,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY, token TEXT NOT NULL, environment TEXT NOT NULL, host TEXT NOT NULL, active INTEGER NOT NULL, updated INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, event TEXT NOT NULL, device TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next INTEGER NOT NULL, expires INTEGER NOT NULL, reason TEXT, UNIQUE(event,device));
       CREATE INDEX IF NOT EXISTS events_session ON events(session,seq);
+      CREATE INDEX IF NOT EXISTS items_session_kind_position ON items(session,json_extract(data,'$.kind'),position);
       CREATE INDEX IF NOT EXISTS outbox_ready ON outbox(status,next);`);
     this.db
       .prepare("INSERT OR IGNORE INTO meta VALUES (?,?)")
@@ -49,9 +50,9 @@ export class Store {
   }
   sessions() {
     return this.db
-      .prepare("SELECT data FROM sessions")
+      .prepare(`SELECT s.data, (SELECT i.data FROM items i WHERE i.session=s.id AND json_extract(i.data,'$.kind')='userMessage' ORDER BY i.position DESC LIMIT 1) AS last_user FROM sessions s`)
       .all()
-      .map((r) => JSON.parse(r.data));
+      .map((r) => ({ ...JSON.parse(r.data), lastUserQuery: r.last_user ? JSON.parse(r.last_user).text?.trim().slice(0, 1000) || "添付のみのメッセージ" : "" }));
   }
   session(id) {
     const r = this.db.prepare("SELECT data FROM sessions WHERE id=?").get(id);
@@ -214,7 +215,7 @@ export class Store {
       const status =
         {
           completed: "応答完了",
-          waiting: "入力待ち",
+          waiting: "確認・承認が必要です",
           failed: "実行失敗",
           test: "通知テスト",
         }[state] ?? state;
