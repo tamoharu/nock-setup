@@ -166,7 +166,7 @@ export class Workspace {
         const { thread } = await c.call("thread/start", { cwd: directory,
           approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write" });
         threadId = thread.id;
-        command = [this.config.codexBin, "resume", "--remote", `unix://${this.socket}`, threadId];
+      command = [this.config.codexBin, "resume", "--no-alt-screen", "--remote", `unix://${this.socket}`, threadId];
       }
       const paneId = await this.tmux.create({ space: space?.sessionId, name: body.name, directory, command });
       const pane = (await this.tmux.panes()).find((p) => p.paneId === paneId);

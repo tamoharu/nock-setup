@@ -95,7 +95,7 @@ try {
     };
     if (command === "terminal" && args[1] === "attach") {
       const p = await api("/v1/workspace/attach", { paneId: option("--pane"), epoch: option("--epoch"), panePid: Number(option("--pid")) });
-      const tmuxArgs = [...(config.tmux?.socket ? ["-S", config.tmux.socket] : []), "attach-session", "-t", p.paneId];
+      const tmuxArgs = await new Tmux(config.tmux).mobileAttachArgs(p);
       process.exitCode = spawnSync(config.tmux?.bin ?? "tmux", tmuxArgs, { stdio: "inherit", env: { ...process.env, TMUX: "" } }).status ?? 1;
     } else if (command === "codex") {
       const tmux = new Tmux(config.tmux);
@@ -104,7 +104,7 @@ try {
         check(p, "pane", "現在のtmux端末を確認できません。");
         const r = await api("/v1/workspace/register", { requestId: randomUUID(), paneId: p.paneId, epoch: p.epoch, panePid: p.panePid });
         check(r.status === "accepted", "receipt", r.result?.message ?? "受理を確認できません。自動再実行しません。");
-        process.exitCode = spawnSync(config.codexBin, ["resume", "--remote", `unix://${r.result.socket}`, r.result.threadId], { stdio: "inherit" }).status ?? 1;
+        process.exitCode = spawnSync(config.codexBin, ["resume", "--no-alt-screen", "--remote", `unix://${r.result.socket}`, r.result.threadId], { stdio: "inherit" }).status ?? 1;
       } else {
         const requestId = randomUUID();
         const project = config.projects.find((p) => p.path === process.cwd()) ?? config.projects[0];

@@ -52,6 +52,16 @@ export class Tmux {
     check(pane && !pane.dead, "terminal_stale", "端末は終了または入れ替わっています。再同期してください。", 409);
     return pane;
   }
+  async mobileAttachArgs(target) {
+    const pane = await this.verified(target);
+    // Only this shared session opts into tmux scrollback. Do not replace the
+    // user's global mouse bindings or window-size policy.
+    await this.run(["set-option", "-t", pane.sessionId, "mouse", "on"]);
+    // A shared PTY has one size. Phone resize events must not shrink the PC.
+    // This flag preserves input (unlike -r) and leaves PC clients attached.
+    return ["-u", ...(this.socket ? ["-S", this.socket] : []),
+      "attach-session", "-f", "ignore-size", "-t", pane.paneId];
+  }
   async create({ space, name, directory, command }) {
     const args = space
       ? ["new-window", "-d", "-t", space, "-n", name, "-c", directory]
