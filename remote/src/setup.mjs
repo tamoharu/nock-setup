@@ -17,6 +17,7 @@ import { connect } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { check, loadConfig } from "./config.mjs";
 import { verifyCodex } from "./codex.mjs";
+import { version } from "./version.mjs";
 
 export const appRoot =
   process.env.NOCK_APP_ROOT ||
@@ -288,7 +289,8 @@ export async function diagnostics(paths, config) {
       value.Self?.TailscaleIPs?.[0] ||
       address;
   } catch {}
-  const running = !!(await daemonHealth(config));
+  const health = await daemonHealth(config);
+  const running = !!health;
   let notifications = false;
   if (running) {
     try {
@@ -305,6 +307,10 @@ export async function diagnostics(paths, config) {
   }
   return {
     running,
+    installedVersion: version,
+    daemonVersion: health?.version ?? null,
+    codeBrowser: health?.capabilities?.codeBrowser === true,
+    restartRequired: running && health.version !== version,
     codexVersion,
     loggedIn: login,
     ssh: await tcpAvailable(),

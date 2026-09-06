@@ -17,6 +17,7 @@ import {
 } from "./setup.mjs";
 import { loadConfig, check } from "./config.mjs";
 import { pairCommand } from "./pairing.mjs";
+import { enableHerdr, disableHerdr } from "./herdr-setup.mjs";
 
 process.umask(0o077);
 const args = process.argv.slice(2),
@@ -32,7 +33,7 @@ try {
     );
   else if (["help", "--help", "-h"].includes(command))
     console.log(
-      `Nock — iPhoneから自分のCodexを操作\n\n  nock setup [プロジェクトのパス]  初期設定・常駐起動・QRでiPhone登録\n  nock pair                      5分間の登録QRを表示\n  nock project add PATH [名前]    プロジェクトを追加\n  nock codex                     tmuxで共有Codexを開始\n  nock doctor                    接続・ログイン状態を確認\n  nock start / stop / restart     常駐を操作（stopは実行中の作業も中断）\n  nock login                     通常のCodexへログイン\n  nock run                       常駐を前景で起動\n\n初回: brew install tamoharu/nock/nock && nock setup\nQR不要: nock setup --no-pair\n登録: nock pair [--no-open] [--ssh-port 22]`,
+      `Nock — iPhoneから自分のCodexを操作\n\n  nock setup [プロジェクトのパス]  初期設定・常駐起動・QRでiPhone登録\n  nock pair                      5分間の登録QRを表示\n  nock project add PATH [名前]    プロジェクトを追加\n  nock codex                     tmuxで共有Codexを開始\n  nock herdr enable / disable    HerdrのAgents表示を連携・復元\n  nock herdr status [--json]      Herdr連携の状態を確認\n  nock doctor                    接続・ログイン状態を確認\n  nock start / stop / restart     常駐を操作（stopは実行中の作業も中断）\n  nock login                     通常のCodexへログイン\n  nock run                       常駐を前景で起動\n\n初回: brew install tamoharu/nock/nock && nock setup\nQR不要: nock setup --no-pair\n登録: nock pair [--no-open] [--ssh-port 22]`,
     );
   else if (command === "pair") {
     await pairCommand({ sshPort: Number(option("--ssh-port") || 22), noOpen: args.includes("--no-open") });
@@ -93,7 +94,20 @@ try {
       check(r.ok, "api", value.error?.message ?? "Nock常駐へ接続できません。");
       return value;
     };
-    if (command === "terminal" && args[1] === "attach") {
+    if (command === "herdr") {
+      const action = args[1] ?? "status";
+      check(["enable", "disable", "status"].includes(action), "command", "nock herdr enable / disable / status [--json]");
+      let state = await api("/v1/herdr");
+      if (action === "enable") {
+        await enableHerdr(config, { configPath: option("--herdr-config"), socketPath: option("--socket"), hostName: option("--host-name") });
+        state = await api("/v1/herdr/reload", {});
+      } else if (action === "disable") {
+        await disableHerdr(config); state = await api("/v1/herdr/reload", {});
+      }
+      if (args.includes("--json")) console.log(JSON.stringify(state));
+      else if (!state.enabled) console.log("Herdr連携は無効です。nock herdr enable で有効化できます。");
+      else console.log(`Herdr連携: ${state.connected ? "接続中" : "接続待ち"}\nAgents: ${state.agents ?? 0} / 会話取得: ${state.matched ?? 0}${state.error ? "\n" + state.error : ""}`);
+    } else if (command === "terminal" && args[1] === "attach") {
       const p = await api("/v1/workspace/attach", { paneId: option("--pane"), epoch: option("--epoch"), panePid: Number(option("--pid")) });
       const tmuxArgs = await new Tmux(config.tmux).mobileAttachArgs(p);
       process.exitCode = spawnSync(config.tmux?.bin ?? "tmux", tmuxArgs, { stdio: "inherit", env: { ...process.env, TMUX: "" } }).status ?? 1;
@@ -133,6 +147,7 @@ try {
       else {
         for (const [name, ok] of [
           ["常駐", r.running],
+          ["コード閲覧", r.codeBrowser],
           ["Codex固定版", r.codexVersion],
           ["Codexログイン", r.loggedIn],
           ["SSH", r.ssh],
@@ -145,6 +160,8 @@ try {
         console.log(
           `接続先: ${r.address}\nSSHユーザー名: ${r.username}\n設定: ${r.configFile}`,
         );
+        console.log(`パッケージ: ${r.installedVersion} / 稼働中: ${r.daemonVersion ?? (r.running ? "旧版（バージョン情報なし）" : "停止中")}`);
+        if (r.restartRequired) console.log("常駐の更新が未反映です。作業完了後に nock restart を実行し、アプリで接続し直してください。");
         for (const p of r.projects)
           console.log(`プロジェクト: ${p.name} (${p.path})`);
       }

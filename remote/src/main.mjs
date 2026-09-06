@@ -5,6 +5,8 @@ import { Service } from "./service.mjs";
 import { NotificationWorker } from "./apns.mjs";
 import { createAPI } from "./http.mjs";
 import { Workspace } from "./workspace.mjs";
+import { HerdrBridge } from "./herdr.mjs";
+import { version } from "./version.mjs";
 
 process.umask(0o077);
 try {
@@ -17,6 +19,7 @@ try {
     service = new Service(store, config);
   service.workspace = new Workspace(store, config);
   service.workspace.messageQueue = service.queue;
+  service.herdr = new HerdrBridge(config, { workspace: service.workspace });
   const worker = new NotificationWorker(
     store,
     config.apns ?? { enabled: false },
@@ -29,7 +32,8 @@ try {
     service.workspace.start();
     service.queue.start();
     worker.start();
-    console.log(`Nock 0.2.0: 127.0.0.1:${config.port} (Codex 0.153.4)`);
+    void service.herdr.start();
+    console.log(`Nock ${version}: 127.0.0.1:${config.port} (Codex 0.153.4)`);
   });
   server.on("error", () => {
     console.error("Nock: localhostポートを開けません。");
@@ -43,7 +47,9 @@ try {
     service.queue.close();
     service.workspace.close();
     service.close();
-    server.close(() => {
+    const bridgeStopped = service.herdr.stop();
+    server.close(async () => {
+      await bridgeStopped;
       store.close();
       process.exit(0);
     });

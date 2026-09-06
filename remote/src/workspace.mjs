@@ -34,6 +34,13 @@ export function lastUserQuery(thread) {
   }
   return "";
 }
+export function conversationSummary(thread, previous = {}) {
+  const turn = thread.turns?.at(-1);
+  const latest = [...(turn?.items ?? [])].reverse().find((i) => i.type === "agentMessage")?.text;
+  return { state: threadState(thread, previous.state), latest: latest?.slice(0, 220) ?? previous.latest ?? "",
+    lastUserQuery: lastUserQuery(thread), runTiming: runTiming(turn, previous.runTiming),
+    turnId: turn?.id ?? previous.turnId ?? null, observedAt: now() };
+}
 export class Workspace {
   constructor(store, config, tmux = new Tmux(config.tmux)) {
     this.store = store; this.chat = new SharedChat(this); this.config = config; this.tmux = tmux;
@@ -138,7 +145,6 @@ export class Workspace {
             if (this.closed) return this.snapshot;
             if (this.records().find((r) => r.id === t.id)?.threadId !== t.threadId) continue;
             const state = threadState(thread, t.state), lastTurn = thread.turns?.at(-1);
-            const latest = [...(lastTurn?.items ?? [])].reverse().find((i) => i.type === "agentMessage")?.text;
             // Polling repairs missed structured events after an observer restart.
             if (lastTurn && ["completed", "failed", "stopped"].includes(state))
               this.transition(this.records().find((r) => r.id === t.id), state, `turn:${lastTurn.id}:${state}`);
@@ -148,12 +154,10 @@ export class Workspace {
               this.save({ ...this.records().find((r) => r.id === t.id), waitingSource: "status" });
             }
             const current = this.records().find((r) => r.id === t.id);
-            this.save({ ...current, state, latest: latest?.slice(0, 220) ?? current.latest, lastUserQuery: lastUserQuery(thread),
-              runTiming: runTiming(lastTurn, current.runTiming),
+            this.save({ ...current, ...conversationSummary(thread, current),
               updatedAt: Math.max(current.updatedAt ?? 0, (thread.updatedAt ?? 0) * 1000,
                 (lastTurn?.startedAt ?? 0) * 1000, (lastTurn?.completedAt ?? 0) * 1000),
-              waitCounter: (current.waitCounter ?? 0) + (current.state === "waiting" && state !== "waiting" ? 1 : 0),
-              observedAt: now(), turnId: lastTurn?.id ?? current.turnId });
+              waitCounter: (current.waitCounter ?? 0) + (current.state === "waiting" && state !== "waiting" ? 1 : 0) });
           } catch {
             const current = this.records().find((r) => r.id === t.id);
             if (!this.closed && current?.threadId === t.threadId) this.save({ ...current, observedAt: null });

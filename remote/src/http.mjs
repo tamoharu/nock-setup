@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { authenticate, check, Fault, now, requestID } from "./config.mjs";
 import { weeklyUsage } from "./agent-settings.mjs";
+import { version } from "./version.mjs";
 
 async function readJSON(req) {
   check(
@@ -59,11 +60,16 @@ export function createAPI(service, worker, config) {
         value = {
           ok: true,
           protocol: 1,
+          version,
           serverId: store.serverId,
           codexVersion: "0.153.4",
-          capabilities: { agentPermissions: true, messageQueue: true, steer: true, attachments: true, spaceManagement: true, codeBrowser: true },
+          capabilities: { agentPermissions: true, messageQueue: true, steer: true, attachments: true, spaceManagement: true, codeBrowser: true, herdrAgents: !!service.herdr },
           time: now(),
         };
+      else if (req.method === "GET" && u.pathname === "/v1/herdr")
+        value = service.herdr?.status() ?? { enabled: false, connected: false };
+      else if (req.method === "POST" && u.pathname === "/v1/herdr/reload")
+        value = await service.herdr?.reload();
       else if (req.method === "GET" && u.pathname === "/v1/sync") {
         const after = Number(u.searchParams.get("after") ?? 0);
         check(

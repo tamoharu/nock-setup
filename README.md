@@ -77,7 +77,28 @@ iPhoneはtmuxの`ignore-size`クライアントとして接続します。PCが�
 
 標準tmuxソケットを検出します。独自の`tmux -S`を使う場合はNockの設定に`"tmux": {"socket": "/absolute/path/to/tmux.sock"}`を指定します。別ユーザーや別ソケットを無条件に走査しません。
 
-## 通知
+## HerdrのAgents表示をNockと揃える
+
+起動済みのHerdr 0.7.5以降で、Nock常駐を起動してから実行します。
+
+```sh
+nock herdr enable
+nock herdr status
+# 元のサイドバー設定へ戻す
+nock herdr disable
+```
+
+Herdrの全Spaceにあるエージェントを、実行中優先・新しい活動順で表示します。マシン名、Space名、Tab名、最後のユーザー指示（2行の抜粋）、状態、今回の実行時間を表示します。実行中の標識とタブはオレンジ、Agentsの標識はHerdr標準の回転表示です。サイドバーの最大幅は40文字になります。
+
+Codexの会話は、各ペインの前景プロセスが開く構造化会話ファイルから特定します。Herdr内の`nock codex`は、現在表示中のtmuxペインとNockの会話を照合します。既存の会話を再開したり指示を送ったりする処理はありません。通常のCodexには`lsof`が必要です（macOSは標準搭載）。会話を特定できない場合は「指示未取得」、実行時間を特定できない場合は「時間不明」を表示します。`≥0:12`は観測開始から12秒以上の意味です。完了後は時間が止まります。
+
+対象は指定したローカルHerdrセッションです。別PCのエージェントを仮想ペインとして追加する機能は含みません。別のソケットや設定ファイルを使う場合は、`nock herdr enable --socket /absolute/path/herdr.sock --herdr-config /absolute/path/config.toml --host-name MyMac`で指定できます。
+
+設定は再読み込みで反映し、端末を再起動しません。元の表示設定はNockのデータディレクトリの`herdr-install.json`に保存します。元の設定ファイルがシンボリックリンクの場合も保持します。無効化時は無関係な設定変更を保持して復元します。Nockが管理する行を手動変更した場合は、上書きせずバックアップの確認を案内します。色にはHerdrの`theme.custom.yellow`を使用するため、テーマ内で同じ色を使う箇所にも適用されます。
+
+実装はHerdrの[サイドバー行設定](https://herdr.dev/docs/configuration/#sidebar-row-layouts)と[Socket API](https://herdr.dev/docs/socket-api/#agent-view-queries)を使用しています。
+
+## 通知の設定
 
 通知中継サービスは使いません。PCから直接Apple APNsへ送ります。APNs鍵は利用者が用意する必要があり、未設定でも端末と会話は使用できます。[APNs設定](docs/APNS.md)を参照してください。
 
@@ -117,3 +138,19 @@ Node.js 24、Codex CLI 0.153.4、ws 8.21.3、qrcode 1.5.4。tmuxとOpenSSL 3はH
 ## 0.3.4 の更新
 
 PC端末からの起動時のスクロール有効化、Workspace一覧取得の待ち時間削減、会話タイトルの整合、コード閲覧APIと実行時間の取得を含みます。常駐側の変更は進行中の作業が終わってから`nock restart`で適用してください。
+
+## 0.3.5 の更新と Ubuntu での反映確認
+
+Macで稼働している現行PC側モジュールを配布します。コード閲覧、Workspaceの応答改善、会話の再表示、任意のHerdr連携を含みます。Herdrは有効化しない限り不要です。
+
+```sh
+brew update
+brew upgrade tamoharu/nock/nock
+# 実行中の作業が終わってから常駐を更新
+nock restart
+nock doctor
+```
+
+`brew upgrade`だけでは、既に動いているNock常駐のコードは入れ替わりません。`nock doctor`で「パッケージ: 0.3.5 / 稼働中: 0.3.5」「コード閲覧: 準備済み」を確認し、iPhoneで接続先へ再接続してください。JSON出力は`installedVersion`、`daemonVersion`、`codeBrowser`、`restartRequired`を返します。旧常駐がバージョン情報を返さない場合も、更新未反映と表示します。
+
+0.3.4にもコード閲覧APIは含まれています。最新版をインストール済みなのに未対応と表示される場合は、まず稼働中の常駐と接続先を確認してください。独自のsystemd unitや手動導入を併用している場合は、同じポートへ別の旧Nockを起動しないよう、起動元を確認してください。
