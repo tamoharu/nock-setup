@@ -16,6 +16,7 @@ import {
   appRoot,
 } from "./setup.mjs";
 import { loadConfig, check } from "./config.mjs";
+import { pairCommand } from "./pairing.mjs";
 
 process.umask(0o077);
 const args = process.argv.slice(2),
@@ -31,8 +32,11 @@ try {
     );
   else if (["help", "--help", "-h"].includes(command))
     console.log(
-      `Nock — iPhoneから自分のCodexを操作\n\n  nock setup [プロジェクトのパス]  初期設定・常駐起動\n  nock project add PATH [名前]    プロジェクトを追加\n  nock codex                     tmuxで共有Codexを開始\n  nock doctor                    接続・ログイン状態を確認\n  nock start / stop / restart     常駐を操作（stopは実行中の作業も中断）\n  nock login                     通常のCodexへログイン\n  nock run                       常駐を前景で起動\n\nHomebrew版はインストール後の nock setup で初期設定と常駐起動が完了します。`,
+      `Nock — iPhoneから自分のCodexを操作\n\n  nock setup [プロジェクトのパス]  初期設定・常駐起動・QRでiPhone登録\n  nock pair                      5分間の登録QRを表示\n  nock project add PATH [名前]    プロジェクトを追加\n  nock codex                     tmuxで共有Codexを開始\n  nock doctor                    接続・ログイン状態を確認\n  nock start / stop / restart     常駐を操作（stopは実行中の作業も中断）\n  nock login                     通常のCodexへログイン\n  nock run                       常駐を前景で起動\n\n初回: brew install tamoharu/nock/nock && nock setup\nQR不要: nock setup --no-pair\n登録: nock pair [--no-open] [--ssh-port 22]`,
     );
+  else if (command === "pair") {
+    await pairCommand({ sshPort: Number(option("--ssh-port") || 22), noOpen: args.includes("--no-open") });
+  }
   else if (command === "setup") {
     const project = args[1] && !args[1].startsWith("--") ? args[1] : undefined;
     const { paths, config, created } = ensureSetup({ project });
@@ -64,6 +68,9 @@ try {
       console.log(
         "通知は別途APNs鍵の設定が必要です。nock doctor で確認できます。",
       );
+      if (!args.includes("--no-pair") && !args.includes("--no-start") && process.stdout.isTTY && report.ssh && report.tailscale) {
+        await pairCommand({ sshPort: Number(option("--ssh-port") || 22), noOpen: args.includes("--no-open") });
+      } else if (!args.includes("--no-pair")) console.log("iPhoneをQRで登録: nock pair");
     }
   } else if (command === "run") {
     const paths = locations();
