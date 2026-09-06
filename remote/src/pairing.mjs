@@ -157,7 +157,8 @@ export async function pairCommand({ sshPort = 22, noOpen = false } = {}) {
     const svg = await QRCode.toString(pairing.qr, { type: "svg", errorCorrectionLevel: "M", margin: 4 });
     writeFileSync(file, `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>Nock · iPhoneを接続</title><style>body{margin:32px;background:#191a24;color:#eee;font:18px system-ui;text-align:center}svg{width:min(72vh,90vw);height:auto;max-width:680px;background:white}p{color:#b8bed0}</style><h1>Nock · iPhoneを接続</h1><p>iPhoneのNockで「QRで接続」を開いて読み取ってください。</p><main>${svg}</main><p>5分間・1台限り。QRは共有しないでください。<br>このPCのターミナルを閉じると登録を終了します。</p><script>setTimeout(()=>{document.querySelector('main').textContent='有効期限が切れました。PCで nock pair を実行してください。'},${Math.max(1, pairing.invitation.e - Date.now())})</script></html>`, { mode: 0o600 });
     console.log("iPhoneのNockで「QRで接続」を開いてください。5分間・1台限り。Ctrl+Cで中止します。");
-    console.log(await QRCode.toString(pairing.qr, { type: "terminal", small: true, errorCorrectionLevel: "M", margin: 2 }));
+    // Screen output can use less damage recovery to reduce the module count.
+    console.log(await QRCode.toString(pairing.qr, { type: "terminal", small: true, errorCorrectionLevel: "L", margin: 2 }));
     if (process.platform === "darwin" && !noOpen) spawnSync("open", [file], { stdio: "ignore" });
     const result = await pairing.done;
     console.log(result === "paired" ? "✓ iPhoneの登録とSSH接続が完了しました。" : result === "registered" ? "SSH鍵は登録済みです。iPhoneで接続を再試行してください。" : "登録窓口を閉じました。再試行: nock pair");
