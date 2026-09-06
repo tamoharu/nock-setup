@@ -1,6 +1,8 @@
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { SharedChat } from "./shared-chat.mjs";
+import { PathTabs } from "./path-tabs.mjs";
 import { Codex } from "./codex.mjs";
 import { Tmux, hasCodexProcess } from "./tmux.mjs";
 import { check, requestID, textInput, now } from "./config.mjs";
@@ -19,7 +21,8 @@ export function threadState(thread, previous = "idle") {
 }
 export class Workspace {
   constructor(store, config, tmux = new Tmux(config.tmux)) {
-    this.store = store; this.config = config; this.tmux = tmux;
+    this.store = store; this.chat = new SharedChat(this); this.config = config; this.tmux = tmux;
+    this.paths = new PathTabs(this);
     this.socket = join(config.dataDir, "codex.sock");
     this.controlName = "nock-control-" + createHash("sha256").update(this.socket).digest("hex").slice(0, 10);
     this.snapshot = { spaces: [], agents: [], syncedAt: null, error: null };
@@ -44,7 +47,10 @@ export class Workspace {
       check(existsSync(this.socket) && statSync(this.socket).isSocket() && statSync(this.socket).uid === process.getuid(),
         "socket_missing", "共有Codexのソケットを確認できません。", 503);
       const c = new Codex(this.config.codexBin, this.config.projects[0].path, { socket: this.socket });
-      c.on("message", (m) => { if (!this.closed) this.onMessage(m); });
+      c.on("message", (m) => { if (!this.closed) { this.chat.onMessage(m, c); this.onMessage(m); } });
+      c.on("closed", () => {
+        for (const [id, a] of this.chat.approvals) if (a.client === c) this.chat.approvals.delete(id);
+      });
       await c.start();
       if (this.closed) { c.stop(); return null; }
       this.client = c;
@@ -101,8 +107,9 @@ export class Workspace {
       if (c) {
         for (const t of records.filter((t) => t.threadId && !t.archived)) {
           try {
-            const { thread } = await c.call("thread/read", { threadId: t.threadId, includeTurns: true }, 8000);
+            const thread = await this.chat.readThread(c, t.threadId);
             if (this.closed) return this.snapshot;
+            if (this.records().find((r) => r.id === t.id)?.threadId !== t.threadId) continue;
             const state = threadState(thread, t.state), lastTurn = thread.turns?.at(-1);
             const latest = [...(lastTurn?.items ?? [])].reverse().find((i) => i.type === "agentMessage")?.text;
             // Polling repairs missed structured events after an observer restart.
@@ -111,19 +118,24 @@ export class Workspace {
             const current = this.records().find((r) => r.id === t.id);
             this.save({ ...current, state, latest: latest?.slice(0, 220) ?? current.latest,
               observedAt: now(), turnId: lastTurn?.id ?? current.turnId });
-          } catch { if (!this.closed) this.save({ ...this.records().find((r) => r.id === t.id), observedAt: null }); }
+          } catch {
+            const current = this.records().find((r) => r.id === t.id);
+            if (!this.closed && current?.threadId === t.threadId) this.save({ ...current, observedAt: null });
+          }
         }
       }
       if (this.closed) return this.snapshot;
       const current = this.records(), spaces = new Map(), agents = [];
       for (const p of panes) {
+        if (current.some((t) => t.pathTab && t.contexts?.some((v) => v.paneId === p.paneId && v.panePid === p.panePid && v.epoch === p.epoch))) continue;
         const owned = current.find((r) => r.epoch === p.epoch && r.paneId === p.paneId && r.panePid === p.panePid);
         const codex = !p.dead && hasCodexProcess(p, processes);
         const tab = { ...p, id: owned?.id ?? `${p.epoch}:${p.paneId}`, name: owned?.name ?? p.windowName,
           kind: owned?.threadId ? "codex" : codex ? "externalCodex" : "shell",
           state: p.dead ? "stopped" : owned?.threadId ? (c && owned.observedAt ? owned.state : "unknown") : codex ? "untracked" : "shell",
           threadId: owned?.threadId ?? null, latest: owned?.latest ?? "", updatedAt: owned?.updatedAt ?? now(),
-          archived: owned?.archived ?? false };
+          archived: owned?.archived ?? false, pathTab: owned?.pathTab ?? false,
+          directory: owned?.pathTab ? owned.directory : p.directory, terminalDirectory: p.directory };
         const spaceId = `${p.epoch}:${p.sessionId}`;
         const space = spaces.get(spaceId) ?? { id: spaceId, sessionId: p.sessionId, epoch: p.epoch,
           name: p.sessionName, directory: p.directory, tabs: [] };
@@ -163,9 +175,10 @@ export class Workspace {
       let threadId = null, command;
       if (body.kind === "codex") {
         const c = await this.shared(true);
-        const { thread } = await c.call("thread/start", { cwd: directory,
+        const { thread } = await c.call("thread/start", { historyMode: "legacy", cwd: directory,
           approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write" });
         threadId = thread.id;
+        await c.call("thread/name/set", { threadId, name: body.name });
       command = [this.config.codexBin, "resume", "--no-alt-screen", "--remote", `unix://${this.socket}`, threadId];
       }
       const paneId = await this.tmux.create({ space: space?.sessionId, name: body.name, directory, command });
@@ -189,7 +202,8 @@ export class Workspace {
       const p = await this.tmux.verified(body);
       check(!hasCodexProcess(p, await this.tmux.processes()), "codex_exists", "この端末には既にCodexがいます。", 409);
       const c = await this.shared(true);
-      const { thread } = await c.call("thread/start", { cwd: p.directory, approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write" });
+      const { thread } = await c.call("thread/start", { historyMode: "legacy", cwd: p.directory, approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write" });
+      await c.call("thread/name/set", { threadId: thread.id, name: p.windowName });
       const t = { ...p, id: body.requestId, name: p.windowName, threadId: thread.id, spaceName: p.sessionName,
         state: "idle", latest: "", archived: false, updatedAt: now() };
       this.save(t);

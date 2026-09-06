@@ -97,10 +97,26 @@ export function createAPI(service, worker, config) {
         value = await service.workspace?.refresh();
       else if (req.method === "POST" && u.pathname === "/v1/workspace/tabs")
         value = await service.workspace?.create(body);
+      else if (req.method === "GET" && u.pathname === "/v1/workspace/directories")
+        value = await service.workspace.paths.directories(u.searchParams.get("q") ?? "", u.searchParams.get("root"));
+      else if (req.method === "POST" && u.pathname === "/v1/workspace/path-tabs")
+        value = await service.workspace.paths.mutate(null, body);
+      else if (path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && path[3] && path[4] === "context" && req.method === "POST")
+        value = await service.workspace.paths.mutate(decodeURIComponent(path[3]), body);
+      else if (path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && path[3] && path[4] === "history" && req.method === "GET")
+        value = await service.workspace.paths.history(decodeURIComponent(path[3]), u.searchParams.get("cursor"));
       else if (req.method === "POST" && u.pathname === "/v1/workspace/register")
         value = await service.workspace?.register(body);
       else if (req.method === "POST" && u.pathname === "/v1/workspace/attach")
         value = await service.workspace?.tmux.verified(body);
+      else if (path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && path[3] && path[4] === "chat") {
+        const id = decodeURIComponent(path[3]);
+        if (req.method === "GET" && path.length === 5) {
+          const before = Number(u.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
+          check(Number.isSafeInteger(before) && before > 0, "cursor", "取得位置が不正です。");
+          value = await service.workspace.chat.detail(id, before);
+        } else if (req.method === "POST") value = await service.workspace.chat.mutate(id, path[5], body, path[6]);
+      }
       else if (req.method === "PATCH" && path[1] === "workspace" && path[2] === "tabs" && path[3])
         value = service.workspace?.archive(decodeURIComponent(path[3]), body.archived);
       else if (req.method === "GET" && u.pathname === "/v1/models")
@@ -146,7 +162,12 @@ export function createAPI(service, worker, config) {
         path[3] === "reconcile"
       ) {
         const request = store.request(path[2]);
-        if (["terminal", "terminalRegister"].includes(request?.kind)) {
+        if (request?.kind?.startsWith("pathTab:")) {
+          const tab = service.workspace.records().find((t) => t.lastPathRequest === request.id);
+          value = tab ? store.finishRequest(request.id, "accepted", { tabId: tab.id, threadId: tab.threadId }) : request;
+        }
+        else if (request?.kind?.startsWith("shared:")) value = request;
+        else if (["terminal", "terminalRegister"].includes(request?.kind)) {
           const tab = service.workspace?.records().find((t) => t.id === request.sessionId);
           value = tab ? store.finishRequest(request.id, "accepted", { tabId: tab.id }) : request;
         } else value = await service.reconcileRequest(path[2]);
@@ -169,7 +190,7 @@ export function createAPI(service, worker, config) {
           "履歴を確認したことの確認が必要です。",
         );
         check(
-          ["terminal", "terminalRegister"].includes(r.kind) || !["running", "waiting", "starting"].includes(
+          r.kind.startsWith("shared:") || ["terminal", "terminalRegister"].includes(r.kind) || !["running", "waiting", "starting"].includes(
             store.session(r.sessionId).state,
           ),
           "busy",
