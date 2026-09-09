@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { authenticate, check, Fault, now, requestID } from "./config.mjs";
 import { weeklyUsage } from "./agent-settings.mjs";
 import { version } from "./version.mjs";
+import { GlobalSearch } from "./global-search.mjs";
 
 async function readJSON(req) {
   check(
@@ -33,6 +34,7 @@ async function readJSON(req) {
 }
 export function createAPI(service, worker, config) {
   const store = service.store;
+  const search = new GlobalSearch(service);
   if (service.workspace) service.workspace.messageQueue = service.queue;
   const server = createServer(async (req, res) => {
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -63,7 +65,7 @@ export function createAPI(service, worker, config) {
           version,
           serverId: store.serverId,
           codexVersion: "0.153.4",
-          capabilities: { agentPermissions: true, messageQueue: true, steer: true, attachments: true, spaceManagement: true, codeBrowser: true, herdrAgents: !!service.herdr },
+          capabilities: { agentPermissions: true, messageQueue: true, messageQueueEditing: true, steer: true, attachments: true, spaceManagement: true, workspaceBranches: true, workspaceBranchCreation: true, codeBrowser: true, globalSearch: true, herdrAgents: !!service.herdr },
           time: now(),
         };
       else if (req.method === "GET" && u.pathname === "/v1/herdr")
@@ -104,12 +106,23 @@ export function createAPI(service, worker, config) {
           sessions: store.sessions(), notifications: worker.status(), workspace: await service.workspace?.refreshLayout(), syncedAt: now() };
       else if (req.method === "GET" && u.pathname === "/v1/workspace")
         value = await service.workspace?.refreshLayout();
+      else if (req.method === "GET" && u.pathname === "/v1/search") {
+        const abort = new AbortController();
+        res.on("close", () => abort.abort());
+        value = await search.page(u.searchParams.get("q"), u.searchParams.get("category") ?? "all", u.searchParams.get("cursor"), abort.signal);
+      }
+      else if (req.method === "GET" && u.pathname === "/v1/search/file")
+        value = await service.workspace.code.read(null, u.searchParams.get("path") ?? "", u.searchParams.get("directory"));
       else if (req.method === "POST" && u.pathname === "/v1/workspace/tabs")
         value = await service.workspace?.create(body);
       else if (req.method === "PATCH" && path.length === 4 && path[0] === "v1" && path[1] === "workspace" && path[2] === "spaces")
         value = await service.workspace.updateSpace(decodeURIComponent(path[3]), body);
       else if (req.method === "GET" && u.pathname === "/v1/workspace/directories")
         value = await service.workspace.paths.directories(u.searchParams.get("q") ?? "", u.searchParams.get("root"));
+      else if (req.method === "GET" && u.pathname === "/v1/workspace/repository")
+        value = await service.workspace.paths.repository(u.searchParams.get("directory"));
+      else if (req.method === "POST" && u.pathname === "/v1/workspace/repository/branches")
+        value = await service.workspace.paths.createBranch(body);
       else if (req.method === "POST" && u.pathname === "/v1/workspace/path-tabs")
         value = await service.workspace.paths.mutate(null, body);
       else if (req.method === "GET" && path.length === 5 && path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && ["files", "file"].includes(path[4])) {
@@ -126,6 +139,11 @@ export function createAPI(service, worker, config) {
         value = await service.workspace?.register(body);
       else if (req.method === "POST" && u.pathname === "/v1/workspace/attach")
         value = await service.workspace?.tmux.verified(body);
+      else if (req.method === "GET" && path.length === 7 && path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && path[3] && path[4] === "chat" && path[5] === "subagents" && path[6]) {
+        const before = Number(u.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
+        check(Number.isSafeInteger(before) && before > 0, "cursor", "取得位置が不正です。");
+        value = await service.workspace.chat.subAgentDetail(decodeURIComponent(path[3]), decodeURIComponent(path[6]), u.searchParams.get("expectedThreadId"), before);
+      }
       else if (path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && path[3] && path[4] === "chat") {
         const id = decodeURIComponent(path[3]);
         if (req.method === "GET" && path.length === 5) {
@@ -135,6 +153,7 @@ export function createAPI(service, worker, config) {
           value.queuedMessages = service.queue?.list(id) ?? [];
         } else if (req.method === "POST" && path[5] === "queue") value = service.queue.add(id, body, true);
         else if (req.method === "DELETE" && path[5] === "queue" && path[6]) value = service.queue.remove(id, path[6]);
+        else if (req.method === "PATCH" && path[5] === "queue" && path[6] && path.length === 7) value = service.queue.update(id, path[6], body);
         else if (req.method === "POST" && path[5] === "attachments") {
           const target = service.workspace.chat.record(id);
           check(body.expectedThreadId === target.threadId, "stale_thread", "会話が変更されました。", 409);
@@ -159,6 +178,11 @@ export function createAPI(service, worker, config) {
         if (path[3] === "chunks") value = await service.attachments.chunk(path[2], body);
         else if (path[3] === "complete") value = await service.attachments.complete(path[2]);
       }
+      else if (req.method === "GET" && path.length === 5 && path[0] === "v1" && path[1] === "sessions" && path[2] && path[3] === "subagents" && path[4]) {
+        const before = Number(u.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER);
+        check(Number.isSafeInteger(before) && before > 0, "cursor", "取得位置が不正です。");
+        value = await service.subAgentDetail(path[2], decodeURIComponent(path[4]), u.searchParams.get("expectedThreadId"), before);
+      }
       else if (path[0] === "v1" && path[1] === "sessions" && path[2]) {
         const id = path[2];
         store.session(id);
@@ -178,6 +202,7 @@ export function createAPI(service, worker, config) {
         else if (req.method === "POST" && path[3] === "steer") value = await service.steer(id, body);
         else if (req.method === "POST" && path[3] === "queue") value = service.queue.add(id, body, false);
         else if (req.method === "DELETE" && path[3] === "queue" && path[4]) value = service.queue.remove(id, path[4]);
+        else if (req.method === "PATCH" && path[3] === "queue" && path[4] && path.length === 5) value = service.queue.update(id, path[4], body);
         else if (req.method === "POST" && path[3] === "attachments") {
           const target = store.session(id);
           check(body.expectedThreadId === target.threadId, "stale_thread", "会話が変更されました。", 409);

@@ -36,6 +36,20 @@ export class MessageQueue {
     this.store.db.prepare("DELETE FROM message_queue WHERE id=? AND session=?").run(queueId, id);
     return { removed: true };
   }
+  update(id, queueId, body) {
+    const row = this.rows().find((r) => r.id === queueId && r.sessionId === id);
+    check(row, "queue_missing", "この項目は送信済み、または削除済みです。", 409);
+    check(["queued", "failed"].includes(row.status), "queue_busy", "送信中、または送信結果が不明な項目は編集できません。", 409);
+    check(typeof body.text === "string" && typeof body.expectedText === "string", "text", "編集する本文が不正です。");
+    check(row.body.text === body.expectedText || row.body.text === body.text,
+      "queue_changed", "本文が別の操作で変更されました。一覧を開き直してください。", 409);
+    const target = this.target(id, row.shared);
+    check(!target.archived && target.threadId === row.body.expectedThreadId, "stale_thread", "会話が変更されたため編集できません。", 409);
+    const updated = { ...row.body, text: body.text };
+    messageInput(this.service.attachments, updated, id, target.threadId);
+    this.save({ ...row, body: updated });
+    return { updated: true };
+  }
   start() { this.timer = setInterval(() => { this.tick().catch(() => {}); }, 1000); this.timer.unref(); }
   close() { this.closed = true; clearInterval(this.timer); }
   async tick() {
@@ -43,7 +57,7 @@ export class MessageQueue {
     this.running = true;
     try {
       const seen = new Set();
-      for (const row of this.rows()) {
+      for (let row of this.rows()) {
         if (this.closed || seen.has(row.sessionId)) continue;
         seen.add(row.sessionId);
         if (row.status !== "queued") {
@@ -61,13 +75,19 @@ export class MessageQueue {
             const thread = await this.service.workspace.chat.readThread(c, target.threadId);
             if (thread.status?.type !== "idle") continue;
           } else if (["starting", "running", "waiting"].includes(target.state)) continue;
-          if (this.closed || !this.rows().some((r) => r.id === row.id)) continue;
+          // Shared-thread checks await RPCs; edits or deletion can happen meanwhile.
+          const current = this.rows().find((r) => r.id === row.id);
+          if (this.closed || !current || current.status !== "queued") continue;
+          row = current;
           this.save({ ...row, status: "dispatching" });
           const receipt = row.shared ? await this.service.workspace.chat.mutate(row.sessionId, "turns", row.body)
             : await this.service.send(row.sessionId, row.body);
           if (receipt.status === "accepted") this.store.db.prepare("DELETE FROM message_queue WHERE id=?").run(row.id);
           else this.save({ ...row, status: receipt.status === "rejected" ? "failed" : "unknown", error: receipt.result?.message ?? "送信結果を確認してください。" });
         } catch (error) {
+          const current = this.rows().find((r) => r.id === row.id);
+          if (!current) continue;
+          row = current;
           this.save({ ...row, status: ["busy", "codex_offline", "unknown_request"].includes(error.code) ? "queued" : "failed", error: error.message });
         }
       }

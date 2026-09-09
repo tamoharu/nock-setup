@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { Attachments, messageInput } from "./attachments.mjs";
 import { MessageQueue } from "./message-queue.mjs";
 import { runTiming } from "./run-timing.mjs";
+import { applyActivityEvent, freezeActivityItem, mergeActivityItem, publicConversationItem, activityNeedsSave } from "./conversation-activity.mjs";
+import { subagentPage, subagentReferences } from "./subagent-history.mjs";
 import {
   now,
   check,
@@ -501,7 +503,7 @@ export class Service {
           error: {
             code: -32601,
             message:
-              "Nock does not support this request. No approval was granted.",
+              "xroam does not support this request. No approval was granted.",
           },
         });
         this.store.event(id, "unsupported_request", { method: m.method });
@@ -555,7 +557,7 @@ export class Service {
     if (p.turnId && s.turnId && p.turnId !== s.turnId) return;
     this.store.transaction(() => {
       if (m.method === "turn/started") {
-        // Only Nock owns this app-server, and send() serializes one dispatch
+        // Only xroam owns this app-server, and send() serializes one dispatch
         // per session. Bind the start event to that journal entry, not to a
         // guessed equality between public item IDs and clientUserMessageId.
         const receipt =
@@ -584,6 +586,7 @@ export class Service {
         );
         if (!event) return;
         this.importTurns(id, [p.turn]);
+        this.freezeTurnItems(id, p.turn, now());
         this.store.expireApprovals(id);
         const state =
           { completed: "completed", failed: "failed", interrupted: "stopped" }[
@@ -598,42 +601,34 @@ export class Service {
         if (["completed", "failed"].includes(state))
           this.store.enqueue(event, s, state, this.project(s.projectId).name);
       } else if (["item/started", "item/completed"].includes(m.method)) {
-        this.saveCodexItem(id, p.turnId, p.item);
-      } else if (m.method === "item/agentMessage/delta") {
-        const old = this.store.item(id, p.itemId) ?? {
-          id: p.itemId,
-          kind: "agentMessage",
-          text: "",
-          turnId: p.turnId,
-        };
-        const item = this.store.saveItem(id, {
-          ...old,
-          text: old.text + p.delta,
+        const observedAt = now();
+        this.saveCodexItem(id, p.turnId, p.item, {
+          startedAt: m.method === "item/started" ? p.startedAtMs ?? observedAt : null,
+          completedAt: m.method === "item/completed" ? p.completedAtMs ?? observedAt : null,
+          live: m.method === "item/started",
+          terminal: m.method === "item/completed",
+          source: "event",
         });
-        const ev = this.store.event(id, "item", { itemId: item.id });
-        this.store.saveSession({
+      } else if ([
+        "item/agentMessage/delta",
+        "item/plan/delta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/summaryPartAdded",
+        "item/reasoning/textDelta",
+        "item/commandExecution/outputDelta",
+        "item/fileChange/outputDelta",
+      ].includes(m.method)) {
+        const old = this.store.item(id, p.itemId);
+        const item = applyActivityEvent(old, m.method, p, now());
+        if (!activityNeedsSave(old, item)) return;
+        const saved = this.store.saveItem(id, item);
+        const ev = this.store.event(id, "item", { itemId: saved.id });
+        if (saved.kind === "agentMessage") this.store.saveSession({
           ...s,
-          latest: item.text.slice(-180),
+          latest: saved.text.slice(-180),
           updatedAt: now(),
-          lastEventSeq: ev.seq,
+          lastEventSeq: ev?.seq ?? s.lastEventSeq,
         });
-      } else if (
-        [
-          "item/commandExecution/outputDelta",
-          "item/fileChange/outputDelta",
-        ].includes(m.method)
-      ) {
-        const old = this.store.item(id, p.itemId) ?? {
-          id: p.itemId,
-          kind: "commandExecution",
-          text: "",
-          turnId: p.turnId,
-        };
-        this.store.saveItem(id, {
-          ...old,
-          output: ((old.output ?? "") + p.delta).slice(-100000),
-        });
-        this.store.event(id, "item", { itemId: p.itemId });
       } else if (m.method === "serverRequest/resolved") {
         const key = `${c.record.owner}:${p.requestId}`;
         const row = this.store.db
@@ -663,41 +658,46 @@ export class Service {
         this.store.event(id, m.method, p);
     });
   }
-  saveCodexItem(id, turnId, item) {
+  saveCodexItem(id, turnId, item, lifecycle = {}) {
     if (!item?.id) return;
-    const text =
-      item.text ??
-      (item.type === "userMessage"
-        ? (item.content ?? [])
-            .filter((x) => x.type === "text")
-            .map((x) => x.text)
-            .join("\n")
-        : "");
     const previous = this.store.item(id, item.id);
-    this.store.saveItem(id, {
-      id: item.id,
-      turnId,
-      kind: item.type,
-      text,
-      phase: item.phase ?? null,
-      detail: item,
-      output: item.aggregatedOutput ?? previous?.output ?? "",
-    });
+    const saved = mergeActivityItem(previous, item, turnId, { observedAt: now(), ...lifecycle });
+    if (!activityNeedsSave(previous, saved)) return previous;
+    this.store.saveItem(id, saved);
     const ev = this.store.event(id, "item", { itemId: item.id });
     const s = this.store.session(id);
     this.store.saveSession({
       ...s,
-      latest: text ? text.slice(-180) : s.latest,
+      latest: saved.text ? saved.text.slice(-180) : s.latest,
       updatedAt: now(),
-      lastEventSeq: ev.seq,
+      lastEventSeq: ev?.seq ?? s.lastEventSeq,
     });
+    return saved;
   }
   importTurns(id, turns) {
     for (const t of turns)
-      for (const item of t.items ?? []) this.saveCodexItem(id, t.id, item);
+      for (const item of t.items ?? []) this.saveCodexItem(id, t.id, item, {
+        live: t.status === "inProgress",
+        terminal: ["completed", "failed", "interrupted"].includes(t.status),
+        source: "snapshot",
+      });
     if (turns.length) {
       const s = this.store.session(id);
       this.store.saveSession({ ...s, runTiming: runTiming(turns.at(-1), s.runTiming) });
+    }
+  }
+  freezeTurnItems(id, turn, observedAt) {
+    if (!["completed", "failed", "interrupted"].includes(turn.status)) return;
+    const present = new Set((turn.items ?? []).map((item) => item.id));
+    const rows = this.store.db.prepare("SELECT data FROM items WHERE session=? AND json_extract(data,'$.turnId')=?")
+      .all(id, turn.id);
+    for (const row of rows) {
+      const previous = JSON.parse(row.data);
+      if (present.has(previous.id)) continue;
+      const next = freezeActivityItem(previous, observedAt);
+      if (!activityNeedsSave(previous, next)) continue;
+      this.store.saveItem(id, next);
+      this.store.event(id, "item", { itemId: next.id });
     }
   }
   closeSession(id, message) {
@@ -726,7 +726,7 @@ export class Service {
     const s = this.store.session(id);
     return {
       session: s,
-      items: this.store.items(id, before, limit),
+      items: this.store.items(id, before, limit).map(publicConversationItem),
       approvals: this.store.pending(id),
       requests: this.store.db
         .prepare(
@@ -735,6 +735,37 @@ export class Service {
         .all(id)
         .map((r) => this.store.request(r.id)),
     };
+  }
+  async subAgentDetail(id, agentThreadId, expectedThreadId, before = Number.MAX_SAFE_INTEGER) {
+    check(typeof expectedThreadId === "string" && expectedThreadId.length > 0,
+      "expected_thread", "親会話を指定してください。");
+    const parent = this.store.session(id);
+    check(parent.threadId === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    // client(session) resumes its thread, so inspection can only use an
+    // already-live client or the read-only control client.
+    let c = this.clients.get(id);
+    if (!c?.alive) {
+      c = await this.control();
+      check(this.store.session(id).threadId === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    }
+    const result = await c.call("thread/read", { threadId: expectedThreadId, includeTurns: true });
+    check(this.store.session(id).threadId === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    check(result.thread?.id === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    const overlays = this.store.db.prepare("SELECT data FROM items WHERE session=? ORDER BY position").all(id)
+      .map((row) => JSON.parse(row.data));
+    const reference = subagentReferences(expectedThreadId, result.thread, overlays).get(agentThreadId);
+    check(reference, "subagent_reference", "この会話に属するサブエージェントではありません。", 404);
+    let child;
+    try {
+      child = (await c.call("thread/read", { threadId: agentThreadId, includeTurns: true })).thread;
+    } catch (e) {
+      if (e.code !== "codex_rejected" || !e.message.includes("not materialized yet")) throw e;
+      child = (await c.call("thread/read", { threadId: agentThreadId, includeTurns: false })).thread;
+      Object.defineProperty(child, "_xroamHistoryLimited", { value: true });
+    }
+    check(this.store.session(id).threadId === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    check(child?.id === agentThreadId, "subagent_reference", "この会話に属するサブエージェントではありません。", 404);
+    return subagentPage({ parentThreadId: expectedThreadId, reference, thread: child, before });
   }
   archive(id, value) {
     return this.change(this.store.session(id), { archived: !!value });

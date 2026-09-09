@@ -20,23 +20,23 @@ import { verifyCodex } from "./codex.mjs";
 import { version } from "./version.mjs";
 
 export const appRoot =
-  process.env.NOCK_APP_ROOT ||
+  process.env.XROAM_APP_ROOT ||
   resolve(dirname(fileURLToPath(import.meta.url)), "..");
-export function locations(root = process.env.NOCK_HOME) {
+export function locations(root = process.env.XROAM_HOME) {
   if (root)
     check(
       isAbsolute(root),
       "setup_path",
-      "NOCK_HOMEは絶対パスで指定してください。",
+      "XROAM_HOMEは絶対パスで指定してください。",
     );
   const configDir = root
     ? join(root, "config")
-    : join(homedir(), ".config/nock");
+    : join(homedir(), ".config/xroam");
   return {
     configDir,
     configFile: join(configDir, "config.json"),
-    dataDir: root ? join(root, "data") : join(homedir(), ".local/share/nock"),
-    workspace: root ? join(root, "projects") : join(homedir(), "NockProjects"),
+    dataDir: root ? join(root, "data") : join(homedir(), ".local/share/xroam"),
+    workspace: root ? join(root, "projects") : join(homedir(), "xroamProjects"),
   };
 }
 export function writeConfig(path, config) {
@@ -92,7 +92,7 @@ export function ensureSetup({
       enabled: false,
       teamId: "",
       keyId: "",
-      bundleId: "com.deep.nock",
+      bundleId: "com.deep.xroam",
       keyFile: join(paths.configDir, "AuthKey.p8"),
     },
   };
@@ -135,7 +135,7 @@ const systemdQuote = (s) =>
   '"';
 export function serviceDefinition({
   platform = process.platform,
-  node = process.env.NOCK_NODE_BIN || process.execPath,
+  node = process.env.XROAM_NODE_BIN || process.execPath,
   main = join(appRoot, "src/cli.mjs"),
   configFile,
   dataDir,
@@ -143,15 +143,15 @@ export function serviceDefinition({
 }) {
   const args = [node, main, "run", "--config", configFile];
   if (platform === "darwin")
-    return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>com.deep.nock.daemon</string><key>ProgramArguments</key><array>${args.map((a) => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>5</integer><key>Umask</key><integer>63</integer><key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(path)}</string></dict><key>StandardOutPath</key><string>${xml(join(dataDir, "service.log"))}</string><key>StandardErrorPath</key><string>${xml(join(dataDir, "service.log"))}</string></dict></plist>\n`;
+    return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>com.deep.xroam.daemon</string><key>ProgramArguments</key><array>${args.map((a) => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>5</integer><key>Umask</key><integer>63</integer><key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(path)}</string></dict><key>StandardOutPath</key><string>${xml(join(dataDir, "service.log"))}</string><key>StandardErrorPath</key><string>${xml(join(dataDir, "service.log"))}</string></dict></plist>\n`;
   check(platform === "linux", "platform", "macOS / Linuxに対応しています。");
-  return `[Unit]\nDescription=Nock personal Codex controller\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${args.map(systemdQuote).join(" ")}\nEnvironment=${systemdQuote("PATH=" + path)}\nRestart=on-failure\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=15\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
+  return `[Unit]\nDescription=xroam personal Codex controller\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${args.map(systemdQuote).join(" ")}\nEnvironment=${systemdQuote("PATH=" + path)}\nRestart=on-failure\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=15\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
 }
 function manager(command, args, required = true) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 20000 });
   if (required && result.status !== 0)
     throw new Error(
-      `${command}による常駐設定に失敗しました。nock doctor で確認してください。`,
+      `${command}による常駐設定に失敗しました。xroam doctor で確認してください。`,
     );
   return result.status === 0;
 }
@@ -183,21 +183,21 @@ export async function reloadProjects(config) {
   check(
     response.ok,
     "reload",
-    "追加内容は保存しましたが反映できませんでした。作業終了後にnock restartを実行してください。",
+    "追加内容は保存しましたが反映できませんでした。作業終了後にxroam restartを実行してください。",
   );
   return true;
 }
 export async function startService(paths, config) {
   check(
-    !process.env.NOCK_HOME,
+    !process.env.XROAM_HOME,
     "test_root",
-    "NOCK_HOME指定時はOSの常駐登録を行いません。runを直接実行してください。",
+    "XROAM_HOME指定時はOSの常駐登録を行いません。runを直接実行してください。",
   );
   if (await daemonHealth(config)) return { alreadyRunning: true };
   check(
     !(await tcpAvailable(config.port)),
     "port_in_use",
-    "APIポートが別のプロセスに使用されています。既存プロセスは停止していません。nock doctorで設定を確認してください。",
+    "APIポートが別のプロセスに使用されています。既存プロセスは停止していません。xroam doctorで設定を確認してください。",
   );
   verifyCodex(config.codexBin);
   const definition = serviceDefinition({
@@ -206,18 +206,18 @@ export async function startService(paths, config) {
   });
   if (process.platform === "darwin") {
     const dir = join(homedir(), "Library/LaunchAgents"),
-      file = join(dir, "com.deep.nock.daemon.plist");
+      file = join(dir, "com.deep.xroam.daemon.plist");
     mkdirSync(dir, { recursive: true });
     writeFileSync(file, definition, { mode: 0o600 });
     const target = `gui/${process.getuid()}`;
-    manager("launchctl", ["bootout", `${target}/com.deep.nock.daemon`], false);
+    manager("launchctl", ["bootout", `${target}/com.deep.xroam.daemon`], false);
     manager("launchctl", ["bootstrap", target, file]);
   } else {
     const dir = join(homedir(), ".config/systemd/user");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(join(dir, "nock.service"), definition, { mode: 0o600 });
+    writeFileSync(join(dir, "xroam.service"), definition, { mode: 0o600 });
     manager("systemctl", ["--user", "daemon-reload"]);
-    manager("systemctl", ["--user", "enable", "--now", "nock.service"]);
+    manager("systemctl", ["--user", "enable", "--now", "xroam.service"]);
     if (
       !manager(
         "loginctl",
@@ -235,22 +235,22 @@ export async function startService(paths, config) {
     await delay(300);
   }
   throw new Error(
-    "常駐の起動を確認できません。nock doctor とサービスログを確認してください。",
+    "常駐の起動を確認できません。xroam doctor とサービスログを確認してください。",
   );
 }
 export function stopService() {
   check(
-    !process.env.NOCK_HOME,
+    !process.env.XROAM_HOME,
     "test_root",
-    "NOCK_HOME指定時はOSの常駐登録を変更しません。",
+    "XROAM_HOME指定時はOSの常駐登録を変更しません。",
   );
   if (process.platform === "darwin")
     manager(
       "launchctl",
-      ["bootout", `gui/${process.getuid()}/com.deep.nock.daemon`],
+      ["bootout", `gui/${process.getuid()}/com.deep.xroam.daemon`],
       false,
     );
-  else manager("systemctl", ["--user", "disable", "--now", "nock.service"]);
+  else manager("systemctl", ["--user", "disable", "--now", "xroam.service"]);
 }
 async function tcpAvailable(port = 22) {
   return new Promise((resolve) => {

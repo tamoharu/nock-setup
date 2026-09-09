@@ -13,7 +13,13 @@ export class CodeBrowser {
   async context(id, path, expectedDirectory) {
     const recorded = this.workspace.records().find((t) => t.id === id);
     const current = this.workspace.snapshot.spaces.flatMap((s) => s.tabs).find((t) => t.id === id);
-    const tab = recorded?.pathTab ? recorded : current ?? recorded;
+    // Search may open an empty/archived space without creating a terminal.
+    // The root still has to be registered in this daemon's workspace.
+    const space = id == null && this.workspace.snapshot.spaces.find(s => (s.baseDirectory ?? s.directory) === expectedDirectory);
+    const knownRoot = id == null && [...this.workspace.records(), ...this.workspace.snapshot.spaces.flatMap(s => s.tabs)]
+      .find(t => t.directory === expectedDirectory);
+    const tab = id == null ? (space || knownRoot ? { directory: expectedDirectory } : null)
+      : recorded?.pathTab ? recorded : current ?? recorded;
     check(tab && !tab.archived && !recorded?.archived, "tab_missing", "タブが見つかりません。", 404);
     check(expectedDirectory === tab.directory, "stale_directory", "作業場所が変更されました。タブを開き直してください。", 409);
     check(typeof path === "string" && !isAbsolute(path) && !/[\x00-\x1f\x7f]/.test(path), "file_path", "ファイルのパスが不正です。");

@@ -1,8 +1,8 @@
 {
   "port": 46211,
-  "dataDir": "/home/YOUR_USER/.local/share/nock",
-  "tokenFile": "/home/YOUR_USER/.config/nock/api-token",
-  "codexBin": "/home/YOUR_USER/.local/share/nock/app/node_modules/.bin/codex",
+  "dataDir": "/home/YOUR_USER/.local/share/xroam",
+  "tokenFile": "/home/YOUR_USER/.config/xroam/api-token",
+  "codexBin": "/home/YOUR_USER/.local/share/xroam/app/node_modules/.bin/codex",
   "projects": [
     { "id": "my-project", "name": "自分のプロジェクト", "path": "/home/YOUR_USER/projects/my-project" }
   ],
@@ -10,7 +10,7 @@
     "enabled": false,
     "teamId": "YOUR_TEAM_ID",
     "keyId": "YOUR_KEY_ID",
-    "bundleId": "com.deep.nock",
-    "keyFile": "/home/YOUR_USER/.config/nock/AuthKey.p8"
+    "bundleId": "com.deep.xroam",
+    "keyFile": "/home/YOUR_USER/.config/xroam/AuthKey.p8"
   }
 }

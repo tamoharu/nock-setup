@@ -29,11 +29,11 @@ const option = (name) => {
 try {
   if (["--version", "version"].includes(command))
     console.log(
-      "Nock " + JSON.parse(readFileSync(join(appRoot, "package.json"))).version,
+      "xroam " + JSON.parse(readFileSync(join(appRoot, "package.json"))).version,
     );
   else if (["help", "--help", "-h"].includes(command))
     console.log(
-      `Nock — iPhoneから自分のCodexを操作\n\n  nock setup [プロジェクトのパス]  初期設定・常駐起動・QRでiPhone登録\n  nock pair                      5分間の登録QRを表示\n  nock project add PATH [名前]    プロジェクトを追加\n  nock codex                     tmuxで共有Codexを開始\n  nock herdr enable / disable    HerdrのAgents表示を連携・復元\n  nock herdr status [--json]      Herdr連携の状態を確認\n  nock doctor                    接続・ログイン状態を確認\n  nock start / stop / restart     常駐を操作（stopは実行中の作業も中断）\n  nock login                     通常のCodexへログイン\n  nock run                       常駐を前景で起動\n\n初回: brew install tamoharu/nock/nock && nock setup\nQR不要: nock setup --no-pair\n登録: nock pair [--no-open] [--ssh-port 22]`,
+      `xroam — iPhoneから自分のCodexを操作\n\n  xroam setup [プロジェクトのパス]  初期設定・常駐起動・QRでiPhone登録\n  xroam pair                      5分間の登録QRを表示\n  xroam project add PATH [名前]    プロジェクトを追加\n  xroam codex                     tmuxで共有Codexを開始\n  xroam herdr enable / disable    HerdrのAgents表示を連携・復元\n  xroam herdr status [--json]      Herdr連携の状態を確認\n  xroam doctor                    接続・ログイン状態を確認\n  xroam start / stop / restart     常駐を操作（stopは実行中の作業も中断）\n  xroam login                     通常のCodexへログイン\n  xroam run                       常駐を前景で起動\n\n初回: brew install tamoharu/xroam/xroam && xroam setup\nQR不要: xroam setup --no-pair\n登録: xroam pair [--no-open] [--ssh-port 22]`,
     );
   else if (command === "pair") {
     await pairCommand({ sshPort: Number(option("--ssh-port") || 22), noOpen: args.includes("--no-open") });
@@ -48,7 +48,7 @@ try {
     if (!args.includes("--no-start")) await startService(paths, config);
     console.log(
       created
-        ? "Nockの設定を作成しました。"
+        ? "xroamの設定を作成しました。"
         : "既存の設定・認証情報・履歴を保持しています。",
     );
     console.log("設定: " + paths.configFile);
@@ -58,7 +58,7 @@ try {
         `iPhoneの接続先: ${report.address}\nSSHユーザー名: ${report.username}\nAPIトークン: SSH認証後にアプリが自動取得します。`,
       );
       if (!report.loggedIn)
-        console.log("初回だけ nock login を実行してください。");
+        console.log("初回だけ xroam login を実行してください。");
       if (!report.ssh)
         console.log(
           process.platform === "darwin"
@@ -67,11 +67,11 @@ try {
         );
       if (!report.tailscale) console.log("Tailscaleを接続してください。");
       console.log(
-        "通知は別途APNs鍵の設定が必要です。nock doctor で確認できます。",
+        "通知は別途APNs鍵の設定が必要です。xroam doctor で確認できます。",
       );
       if (!args.includes("--no-pair") && !args.includes("--no-start") && process.stdout.isTTY && report.ssh && report.tailscale) {
         await pairCommand({ sshPort: Number(option("--ssh-port") || 22), noOpen: args.includes("--no-open") });
-      } else if (!args.includes("--no-pair")) console.log("iPhoneをQRで登録: nock pair");
+      } else if (!args.includes("--no-pair")) console.log("iPhoneをQRで登録: xroam pair");
     }
   } else if (command === "run") {
     const paths = locations();
@@ -91,12 +91,12 @@ try {
         ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(60000),
       });
       const value = await r.json();
-      check(r.ok, "api", value.error?.message ?? "Nock常駐へ接続できません。");
+      check(r.ok, "api", value.error?.message ?? "xroam常駐へ接続できません。");
       return value;
     };
     if (command === "herdr") {
       const action = args[1] ?? "status";
-      check(["enable", "disable", "status"].includes(action), "command", "nock herdr enable / disable / status [--json]");
+      check(["enable", "disable", "status"].includes(action), "command", "xroam herdr enable / disable / status [--json]");
       let state = await api("/v1/herdr");
       if (action === "enable") {
         await enableHerdr(config, { configPath: option("--herdr-config"), socketPath: option("--socket"), hostName: option("--host-name") });
@@ -105,7 +105,7 @@ try {
         await disableHerdr(config); state = await api("/v1/herdr/reload", {});
       }
       if (args.includes("--json")) console.log(JSON.stringify(state));
-      else if (!state.enabled) console.log("Herdr連携は無効です。nock herdr enable で有効化できます。");
+      else if (!state.enabled) console.log("Herdr連携は無効です。xroam herdr enable で有効化できます。");
       else console.log(`Herdr連携: ${state.connected ? "接続中" : "接続待ち"}\nAgents: ${state.agents ?? 0} / 会話取得: ${state.matched ?? 0}${state.error ? "\n" + state.error : ""}`);
     } else if (command === "terminal" && args[1] === "attach") {
       const p = await api("/v1/workspace/attach", { paneId: option("--pane"), epoch: option("--epoch"), panePid: Number(option("--pid")) });
@@ -122,8 +122,7 @@ try {
         process.exitCode = spawnSync(config.codexBin, ["resume", "--no-alt-screen", "--remote", `unix://${r.result.socket}`, r.result.threadId], { stdio: "inherit" }).status ?? 1;
       } else {
         const requestId = randomUUID();
-        const project = config.projects.find((p) => p.path === process.cwd()) ?? config.projects[0];
-        const r = await api("/v1/workspace/tabs", { requestId, name: `codex-${requestId.slice(0, 8)}`, projectId: project.id, kind: "codex" });
+        const r = await api("/v1/workspace/tabs", { requestId, name: `codex-${requestId.slice(0, 8)}`, directory: process.cwd(), kind: "codex" });
         check(r.status === "accepted", "receipt", r.result?.message ?? "受理を確認できません。");
         const w = await api("/v1/workspace");
         const t = w.spaces.flatMap((s) => s.tabs).find((t) => t.id === r.result.tabId);
@@ -161,7 +160,7 @@ try {
           `接続先: ${r.address}\nSSHユーザー名: ${r.username}\n設定: ${r.configFile}`,
         );
         console.log(`パッケージ: ${r.installedVersion} / 稼働中: ${r.daemonVersion ?? (r.running ? "旧版（バージョン情報なし）" : "停止中")}`);
-        if (r.restartRequired) console.log("常駐の更新が未反映です。作業完了後に nock restart を実行し、アプリで接続し直してください。");
+        if (r.restartRequired) console.log("常駐の更新が未反映です。作業完了後に xroam restart を実行し、アプリで接続し直してください。");
         for (const p of r.projects)
           console.log(`プロジェクト: ${p.name} (${p.path})`);
       }
@@ -182,15 +181,15 @@ try {
       console.log(
         updated
           ? "プロジェクトを追加して反映しました。実行中の作業は継続します。"
-          : "プロジェクトを登録しました。nock startで反映されます。",
+          : "プロジェクトを登録しました。xroam startで反映されます。",
       );
-    } else throw new Error("操作を確認してください: nock --help");
+    } else throw new Error("操作を確認してください: xroam --help");
   }
 } catch (error) {
   console.error(
-    "Nock: " +
+    "xroam: " +
       (error.code === "ENOENT"
-        ? "初回は nock setup を実行してください。"
+        ? "初回は xroam setup を実行してください。"
         : error.message),
   );
   process.exitCode = 1;

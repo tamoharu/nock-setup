@@ -8,6 +8,21 @@ import { threadState } from "./workspace.mjs";
 import { permissionOverrides } from "./agent-settings.mjs";
 import { messageInput } from "./attachments.mjs";
 import { runTiming } from "./run-timing.mjs";
+import { activityNeedsSave, activityStorageId, applyActivityEvent, conversationText, freezeActivityItem, mergeActivityItem, publicConversationItem } from "./conversation-activity.mjs";
+import { subagentPage, subagentReferences } from "./subagent-history.mjs";
+
+function fallbackMessageMatches(kind, snapshot, observed, item) {
+  if (snapshot === observed) return true;
+  // Only a still-streaming agent message has prefix-compatible text. Final
+  // messages that happen to share a prefix are distinct messages.
+  const terminal = item?._activity?.terminal || ["completed", "failed", "declined", "interrupted"].includes(item?.detail?.status ?? item?.status);
+  return kind === "agentMessage" && !terminal && snapshot.length > 0 && observed.length > 0 &&
+    (snapshot.startsWith(observed) || observed.startsWith(snapshot));
+}
+
+// Legacy thread/read reconstructs message IDs as item-N, while live events
+// carry UUID/msg_ identities. Both describe the same messages in the same turn.
+const legacyMessageID = (id) => /^item-\d+$/.test(id ?? "");
 
 // A second UI for the existing shared app-server thread; never forks a rollout.
 export class SharedChat {
@@ -36,6 +51,18 @@ export class SharedChat {
     const threadId = m.params?.threadId;
     const t = this.workspace.records().find((t) => t.threadId === threadId);
     if (!t) return;
+    if ([
+      "item/started",
+      "item/completed",
+      "item/agentMessage/delta",
+      "item/plan/delta",
+      "item/reasoning/summaryTextDelta",
+      "item/reasoning/summaryPartAdded",
+      "item/reasoning/textDelta",
+      "item/commandExecution/outputDelta",
+      "item/fileChange/outputDelta",
+    ].includes(m.method)) this.saveLiveItem(t, m.method, m.params ?? {});
+    else if (m.method === "turn/completed") this.freezeLiveTurn(t, m.params?.turn, now());
     if (m.id !== undefined) {
       if ([...this.approvals.values()].some((a) => a.client === client && a.rpcId === m.id)) return;
       const id = randomUUID();
@@ -56,24 +83,89 @@ export class SharedChat {
     try { return (await c.call("thread/read", { threadId, includeTurns: true }, 8000)).thread; }
     catch (e) {
       if (e.code !== "codex_rejected") throw e;
-      if (e.message.includes("not materialized yet"))
-        return (await c.call("thread/read", { threadId, includeTurns: false }, 8000)).thread;
+      if (e.message.includes("not materialized yet")) {
+        const { thread } = await c.call("thread/read", { threadId, includeTurns: false }, 8000);
+        Object.defineProperty(thread, "_xroamHistoryLimited", { value: true });
+        return thread;
+      }
       if (!e.message.includes("list_turns is not supported yet")) throw e;
       const { thread } = await c.call("thread/read", { threadId, includeTurns: false }, 8000);
       // 0.153.4 can create paginated histories while its list API is unavailable.
       // Read only the registered thread's structured rollout; never parse terminal text.
-      return { ...thread, turns: await readRolloutTurns(thread) };
+      const fallback = { ...thread, turns: await readRolloutTurns(thread) };
+      Object.defineProperty(fallback, "_xroamRolloutFallback", { value: true });
+      return fallback;
     }
   }
   async detail(id, before = Number.MAX_SAFE_INTEGER) {
     const t = this.record(id), c = await this.workspace.shared();
     check(c?.alive, "codex_offline", "共有Codexに再接続してください。", 503);
     const thread = await this.readThread(c, t.threadId);
-    const items = (thread.turns ?? []).flatMap((turn) => (turn.items ?? []).map((item) => ({
-      id: item.id, turnId: turn.id, kind: item.type,
-      text: item.text ?? (item.content ?? []).filter((v) => v.type === "text").map((v) => v.text).join("\n"),
-      phase: item.phase ?? null, detail: item, output: item.aggregatedOutput ?? "",
-    }))).map((item, i) => ({ ...item, position: i + 1 }));
+    // A path tab may have switched while thread/read was pending. Re-read its
+    // current identity before touching the persistent event overlay.
+    if (this.record(id).threadId !== t.threadId) return this.detail(id, before);
+    const observedAt = now();
+    // Query just this thread's overlays. Store.items() intentionally paginates
+    // normal history, but a latest-N overlay would lose old item timing.
+    const persisted = this.store.db.prepare("SELECT data FROM items WHERE session=? AND json_extract(data,'$.activityThreadId')=? ORDER BY position")
+      .all(id, t.threadId).map((row) => JSON.parse(row.data))
+      .map((item) => ({ ...item, id: item.activityItemId ?? item.id }));
+    const byKey = new Map(persisted.map((item) => [item.activityStorageId, item]));
+    const items = [];
+    const remaining = new Map(persisted.map((item) => [item.activityStorageId, item]));
+    for (const turn of thread.turns ?? []) {
+      const turnItems = [];
+      const anchors = [];
+      const fallback = this.reconcileFallbackMessages(turn, persisted, !!thread._xroamRolloutFallback);
+      // A reconstructed snapshot can have been persisted while its turn was live.
+      // Once a real event supplies the canonical id, remove that private row
+      // so it cannot be appended after the reconciled item below.
+      for (const synthetic of fallback.retiredSynthetic) {
+        this.store.db.prepare("DELETE FROM items WHERE session=? AND id=?").run(id, synthetic.activityStorageId);
+        byKey.delete(synthetic.activityStorageId);
+        remaining.delete(synthetic.activityStorageId);
+      }
+      const fallbackItems = fallback.items;
+      for (const item of fallbackItems) {
+        const key = activityStorageId(t.threadId, item.id);
+        const previous = byKey.get(key);
+        remaining.delete(key);
+        const next = mergeActivityItem(previous, item, turn.id, {
+          observedAt,
+          live: turn.status === "inProgress",
+          terminal: ["completed", "failed", "interrupted"].includes(turn.status),
+          source: "snapshot",
+        });
+        // Store only live observations and replacements of an existing event;
+        // a polling read never rewrites an entire historical thread.
+        if ((previous || turn.status === "inProgress") && activityNeedsSave(previous, next)) {
+          // Keep snapshot provenance so a later live event can retire this
+          // synthetic observation. It is stripped before public API output.
+          const saved = (thread._xroamRolloutFallback || legacyMessageID(item.id)) && !previous
+            ? { ...next, fallbackSynthetic: true } : next;
+          this.saveStoredItem(t, key, saved);
+        }
+        anchors.push({ item: publicConversationItem(next), position: previous?.position ?? null });
+      }
+      // A terminal turn can omit an outstanding live item. Freeze it without
+      // changing the official item status or claiming a file edit succeeded.
+      for (const [key, previous] of [...remaining]) if (previous.turnId === turn.id) {
+        remaining.delete(key);
+        const next = ["completed", "failed", "interrupted"].includes(turn.status)
+          ? freezeActivityItem(previous, observedAt) : previous;
+        if (activityNeedsSave(previous, next)) this.saveStoredItem(t, key, next);
+        const entry = publicConversationItem(next);
+        const index = anchors.findIndex((anchor) => anchor.position !== null && previous.position < anchor.position);
+        if (index < 0) anchors.push({ item: entry, position: previous.position ?? null });
+        else anchors.splice(index, 0, { item: entry, position: previous.position ?? null });
+      }
+      turnItems.push(...anchors.map((anchor) => anchor.item));
+      items.push(...turnItems);
+    }
+    // thread/read is a full history here. A newly observed turn that is not in
+    // its snapshot is newer than the known turns, so it belongs at the tail.
+    items.push(...[...remaining.values()].map(publicConversationItem));
+    const positioned = items.map((item, index) => ({ ...item, position: index + 1 }));
     return {
       session: { id, name: t.name, projectId: "", threadId: t.threadId,
         turnId: thread.turns?.at(-1)?.id ?? null, state: threadState(thread, t.state),
@@ -81,11 +173,103 @@ export class SharedChat {
         permissionLevel: t.permissionLevel ?? null,
         runTiming: runTiming(thread.turns?.at(-1), t.runTiming),
         archived: t.archived, latest: t.latest, updatedAt: t.updatedAt, createdAt: t.updatedAt, lastEventSeq: 0 },
-      items: items.filter((i) => i.position < before).slice(-200),
+      items: positioned.filter((i) => i.position < before).slice(-200),
       approvals: [...this.approvals.values()].filter((a) => a.sessionId === id && a.client === c && a.status === "pending")
         .map(({ client, rpcId, ...a }) => a),
       requests: this.requests(id),
     };
+  }
+  parentOverlays(id, threadId) {
+    return this.store.db.prepare("SELECT data FROM items WHERE session=? AND json_extract(data,'$.activityThreadId')=? ORDER BY position")
+      .all(id, threadId).map((row) => JSON.parse(row.data));
+  }
+  async subAgentDetail(id, agentThreadId, expectedThreadId, before = Number.MAX_SAFE_INTEGER) {
+    check(typeof expectedThreadId === "string" && expectedThreadId.length > 0,
+      "expected_thread", "親会話を指定してください。");
+    const parent = this.record(id);
+    check(parent.threadId === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    const c = await this.workspace.shared();
+    check(c?.alive, "codex_offline", "共有Codexに再接続してください。", 503);
+    check(this.record(id).threadId === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    const thread = await this.readThread(c, expectedThreadId);
+    check(this.record(id).threadId === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    check(thread?.id === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    const reference = subagentReferences(expectedThreadId, thread, this.parentOverlays(id, expectedThreadId)).get(agentThreadId);
+    check(reference, "subagent_reference", "この会話に属するサブエージェントではありません。", 404);
+    const child = await this.readThread(c, agentThreadId);
+    check(this.record(id).threadId === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
+    check(child?.id === agentThreadId, "subagent_reference", "この会話に属するサブエージェントではありません。", 404);
+    return subagentPage({ parentThreadId: expectedThreadId, reference, thread: child, before });
+  }
+  saveStoredItem(tab, key, item) {
+    const saved = {
+      ...item,
+      id: key,
+      activityStorageId: key,
+      activityItemId: item.id,
+      activityThreadId: tab.threadId,
+    };
+    return this.store.saveItem(tab.id, saved);
+  }
+  reconcileFallbackMessages(turn, persisted, rollout = true) {
+    const isMessage = (item) => ["userMessage", "agentMessage"].includes(item.kind);
+    const isSynthetic = (item) => item.fallbackSynthetic || legacyMessageID(item.id);
+    const reserved = new Set((turn.items ?? []).filter((item) => !rollout && !legacyMessageID(item.id)).map((item) => item.id));
+    const candidates = persisted.filter((item) => item.turnId === turn.id && isMessage(item) && !isSynthetic(item) && !reserved.has(item.id));
+    const synthetic = persisted.filter((item) => item.turnId === turn.id && isMessage(item) && isSynthetic(item));
+    const cursors = new Map(), syntheticCursors = new Map(), retiredSynthetic = [];
+    const nextMatch = (items, cursors, snapshot, snapshotText) => {
+      const start = cursors.get(snapshot.type) ?? 0;
+      for (let index = start; index < items.length; index++) {
+        const observed = items[index];
+        if (observed.kind !== snapshot.type || !fallbackMessageMatches(snapshot.type, snapshotText,
+          observed.text ?? conversationText(observed.detail), observed)) continue;
+        cursors.set(snapshot.type, index + 1);
+        return observed;
+      }
+      return null;
+    };
+    const items = (turn.items ?? []).map((snapshot) => {
+      if (!["userMessage", "agentMessage"].includes(snapshot.type)) return snapshot;
+      if (!rollout && !legacyMessageID(snapshot.id)) return snapshot;
+      const snapshotText = conversationText(snapshot);
+      const observed = nextMatch(candidates, cursors, snapshot, snapshotText);
+      if (!observed) return snapshot;
+      const obsolete = nextMatch(synthetic, syntheticCursors, snapshot, snapshotText);
+      if (obsolete) retiredSynthetic.push(obsolete);
+      return {
+        ...snapshot,
+        ...observed.detail,
+        id: observed.id,
+        type: observed.kind,
+        text: snapshotText,
+        phase: snapshot.phase ?? observed.phase ?? null,
+      };
+    });
+    return { items, retiredSynthetic };
+  }
+  saveLiveItem(tab, method, params) {
+    if (params.threadId !== tab.threadId || !params.itemId && !params.item?.id) return;
+    const itemId = params.itemId ?? params.item.id;
+    const key = activityStorageId(tab.threadId, itemId);
+    const stored = this.store.item(tab.id, key);
+    const previous = stored && { ...stored, id: stored.activityItemId ?? stored.id };
+    const next = applyActivityEvent(previous, method, params, now());
+    if (!activityNeedsSave(previous, next)) return;
+    this.saveStoredItem(tab, key, next);
+  }
+  freezeLiveTurn(tab, turn, observedAt) {
+    if (!turn || !["completed", "failed", "interrupted"].includes(turn.status)) return;
+    const present = new Set((turn.items ?? []).map((item) => item.id));
+    const rows = this.store.db.prepare("SELECT data FROM items WHERE session=? AND json_extract(data,'$.activityThreadId')=? AND json_extract(data,'$.turnId')=?")
+      .all(tab.id, tab.threadId, turn.id);
+    for (const row of rows) {
+      const stored = JSON.parse(row.data);
+      if (present.has(stored.activityItemId ?? stored.id)) continue;
+      const next = freezeActivityItem({ ...stored, id: stored.activityItemId ?? stored.id }, observedAt);
+      if (!activityNeedsSave({ ...stored, id: stored.activityItemId ?? stored.id }, next)) continue;
+      this.saveStoredItem(tab, stored.activityStorageId, next);
+    }
   }
   async mutate(id, action, body, approvalId) {
     requestID(body.requestId);

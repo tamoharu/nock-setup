@@ -20,7 +20,7 @@ export function tailnetAddress() {
   let s;
   try { s = JSON.parse(r.stdout); } catch {}
   const address = s?.Self?.TailscaleIPs?.find(isTailnetIPv4);
-  check(s?.BackendState === "Running" && address, "tailscale", "Tailscaleを接続してから nock pair を実行してください。");
+  check(s?.BackendState === "Running" && address, "tailscale", "Tailscaleを接続してから xroam pair を実行してください。");
   return address;
 }
 export function hostFingerprints() {
@@ -43,17 +43,17 @@ export function validatePublicKey(key) {
   return key;
 }
 // Append only. Never rewrite, relax permissions, follow symlinks or remove the
-// user's existing SSH keys/options. A lock coordinates simultaneous Nock pairers.
+// user's existing SSH keys/options. A lock coordinates simultaneous xroam pairers.
 export function installPublicKey(sshDirectory, key, requestId) {
   validatePublicKey(key);
   check(uuid(requestId), "request", "要求IDが不正です。");
   mkdirSync(sshDirectory, { recursive: true, mode: 0o700 });
   const ds = lstatSync(sshDirectory);
   check(ds.isDirectory() && !ds.isSymbolicLink() && ds.uid === process.getuid() && !(ds.mode & 0o022), "ssh_directory", ".sshの所有者と書き込み権限を確認してください。");
-  const lock = join(sshDirectory, ".nock-pair.lock");
+  const lock = join(sshDirectory, ".xroam-pair.lock");
   let lockFD;
   try { lockFD = openSync(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); }
-  catch { throw new Error("別の登録処理が実行中です。.ssh/.nock-pair.lockが残っている場合は、登録処理終了後に確認してください。"); }
+  catch { throw new Error("別の登録処理が実行中です。.ssh/.xroam-pair.lockが残っている場合は、登録処理終了後に確認してください。"); }
   try {
     const file = join(sshDirectory, "authorized_keys");
     const fd = openSync(file, constants.O_CREAT | constants.O_APPEND | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
@@ -62,8 +62,8 @@ export function installPublicKey(sshDirectory, key, requestId) {
       check(stat.isFile() && stat.nlink === 1 && stat.uid === process.getuid() && !(stat.mode & 0o022) && stat.size < 1024 * 1024,
         "authorized_keys", "authorized_keysの種類・所有者・権限を確認してください。");
       const before = readFileSync(fd, "utf8");
-      const line = `${key} nock:${requestId.toLowerCase()}`;
-      const existing = before.split("\n").filter((s) => s.endsWith(` nock:${requestId.toLowerCase()}`));
+      const line = `${key} xroam:${requestId.toLowerCase()}`;
+      const existing = before.split("\n").filter((s) => s.endsWith(` xroam:${requestId.toLowerCase()}`));
       check(!existing.length || (existing.length === 1 && existing[0] === line), "conflict", "同じ要求IDに異なる鍵が登録されています。");
       if (!existing.length) {
         writeFileSync(fd, (before && !before.endsWith("\n") ? "\n" : "") + line + "\n");
@@ -73,10 +73,10 @@ export function installPublicKey(sshDirectory, key, requestId) {
   } finally { closeSync(lockFD); unlinkSync(lock); }
 }
 export function ephemeralCertificate() {
-  const dir = mkdtempSync(join(tmpdir(), "nock-pair-tls-"));
+  const dir = mkdtempSync(join(tmpdir(), "xroam-pair-tls-"));
   const keyFile = join(dir, "key.pem"), certFile = join(dir, "cert.pem");
   try {
-    const r = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1", "-subj", "/CN=Nock-Pairing", "-keyout", keyFile, "-out", certFile], { stdio: "ignore", timeout: 15000 });
+    const r = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-days", "1", "-subj", "/CN=xroam-Pairing", "-keyout", keyFile, "-out", certFile], { stdio: "ignore", timeout: 15000 });
     check(r.status === 0, "tls", "登録用TLS証明書を作れません。OpenSSLを確認してください。");
     const cert = readFileSync(certFile), key = readFileSync(keyFile);
     return { cert, key, fingerprint: digest(new X509Certificate(cert).raw) };
@@ -103,7 +103,7 @@ export async function createPairing({ address, fingerprints, port = 0, sshPort =
     resolveDone(reason);
   };
   const handle = (request) => {
-    check(clock() < expires && !closed, "expired", "QRの有効期限が切れました。PCで nock pair をやり直してください。");
+    check(clock() < expires && !closed, "expired", "QRの有効期限が切れました。PCで xroam pair をやり直してください。");
     const incoming = typeof request.token === "string" ? Buffer.from(request.token) : Buffer.alloc(0);
     check(request.v === 1 && request.id === id && incoming.length === token.length && timingSafeEqual(incoming, Buffer.from(token)), "unauthorized", "登録券を確認できません。");
     check(uuid(request.requestId), "request", "要求IDが不正です。");
@@ -144,24 +144,24 @@ export async function createPairing({ address, fingerprints, port = 0, sshPort =
   timer = setTimeout(() => close(claim ? "registered" : "expired"), Math.max(1, expires - clock()));
   // Compact payload keeps the QR readable. It is a credential: never log its URI.
   const invitation = { v: 1, id, h: address, p: server.address().port, s: sshPort, u: username, n: name.slice(0, 64), k: fingerprints, c: certificate.fingerprint, t: token, e: expires };
-  const qr = "nock://pair/" + Buffer.from(JSON.stringify(invitation)).toString("base64url");
+  const qr = "xroam://pair/" + Buffer.from(JSON.stringify(invitation)).toString("base64url");
   return { invitation, qr, done, close, address: server.address() };
 }
 export async function pairCommand({ sshPort = 22, noOpen = false } = {}) {
   const pairing = await createPairing({ address: tailnetAddress(), fingerprints: hostFingerprints(), sshPort });
-  const dir = mkdtempSync(join(tmpdir(), "nock-pair-qr-"));
+  const dir = mkdtempSync(join(tmpdir(), "xroam-pair-qr-"));
   const file = join(dir, "pair.html");
   const stop = () => pairing.close();
   process.once("SIGINT", stop); process.once("SIGTERM", stop);
   try {
     const svg = await QRCode.toString(pairing.qr, { type: "svg", errorCorrectionLevel: "M", margin: 4 });
-    writeFileSync(file, `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>Nock · iPhoneを接続</title><style>body{margin:32px;background:#191a24;color:#eee;font:18px system-ui;text-align:center}svg{width:min(72vh,90vw);height:auto;max-width:680px;background:white}p{color:#b8bed0}</style><h1>Nock · iPhoneを接続</h1><p>iPhoneのNockで「QRで接続」を開いて読み取ってください。</p><main>${svg}</main><p>5分間・1台限り。QRは共有しないでください。<br>このPCのターミナルを閉じると登録を終了します。</p><script>setTimeout(()=>{document.querySelector('main').textContent='有効期限が切れました。PCで nock pair を実行してください。'},${Math.max(1, pairing.invitation.e - Date.now())})</script></html>`, { mode: 0o600 });
-    console.log("iPhoneのNockで「QRで接続」を開いてください。5分間・1台限り。Ctrl+Cで中止します。");
+    writeFileSync(file, `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>xroam · iPhoneを接続</title><style>body{margin:32px;background:#191a24;color:#eee;font:18px system-ui;text-align:center}svg{width:min(72vh,90vw);height:auto;max-width:680px;background:white}p{color:#b8bed0}</style><h1>xroam · iPhoneを接続</h1><p>iPhoneのxroamで「QRで接続」を開いて読み取ってください。</p><main>${svg}</main><p>5分間・1台限り。QRは共有しないでください。<br>このPCのターミナルを閉じると登録を終了します。</p><script>setTimeout(()=>{document.querySelector('main').textContent='有効期限が切れました。PCで xroam pair を実行してください。'},${Math.max(1, pairing.invitation.e - Date.now())})</script></html>`, { mode: 0o600 });
+    console.log("iPhoneのxroamで「QRで接続」を開いてください。5分間・1台限り。Ctrl+Cで中止します。");
     // Screen output can use less damage recovery to reduce the module count.
     console.log(await QRCode.toString(pairing.qr, { type: "terminal", small: true, errorCorrectionLevel: "L", margin: 2 }));
     if (process.platform === "darwin" && !noOpen) spawnSync("open", [file], { stdio: "ignore" });
     const result = await pairing.done;
-    console.log(result === "paired" ? "✓ iPhoneの登録とSSH接続が完了しました。" : result === "registered" ? "SSH鍵は登録済みです。iPhoneで接続を再試行してください。" : "登録窓口を閉じました。再試行: nock pair");
+    console.log(result === "paired" ? "✓ iPhoneの登録とSSH接続が完了しました。" : result === "registered" ? "SSH鍵は登録済みです。iPhoneで接続を再試行してください。" : "登録窓口を閉じました。再試行: xroam pair");
   } finally {
     pairing.close(); process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop);
     try { unlinkSync(file); } catch {} rmdirSync(dir);

@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import { CODEX_VERSION, Fault, check } from "./config.mjs";
+import { version } from "./version.mjs";
 
 export function verifyCodex(bin) {
   const version = execFileSync(bin, ["--version"], {
@@ -58,7 +59,7 @@ export function reconcileProcess(record) {
         { encoding: "utf8", timeout: 3000 },
       );
       if (
-        !new RegExp(`(?:^| )NOCK_PROCESS_OWNER=${record.owner}(?: |$)`).test(
+        !new RegExp(`(?:^| )XROAM_PROCESS_OWNER=${record.owner}(?: |$)`).test(
           environment.trim(),
         )
       )
@@ -67,7 +68,7 @@ export function reconcileProcess(record) {
       const env = readFileSync(`/proc/${record.pid}/environ`, "utf8").split(
         "\0",
       );
-      if (!env.includes(`NOCK_PROCESS_OWNER=${record.owner}`))
+      if (!env.includes(`XROAM_PROCESS_OWNER=${record.owner}`))
         return "identity_mismatch";
     }
     process.kill(-record.pid, "SIGTERM");
@@ -94,7 +95,7 @@ export class Codex extends EventEmitter {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
-      env: { ...process.env, NOCK_PROCESS_OWNER: owner },
+      env: { ...process.env, XROAM_PROCESS_OWNER: owner },
     });
     this.alive = true;
     this.record = {
@@ -137,7 +138,7 @@ export class Codex extends EventEmitter {
       }
     });
     await this.call("initialize", {
-      clientInfo: { name: "nock", title: "Nock", version: "0.2.0" },
+      clientInfo: { name: "xroam", title: "xroam", version },
       capabilities: { experimentalApi: true },
     });
     this.send({ method: "initialized", params: {} });
@@ -158,7 +159,7 @@ export class Codex extends EventEmitter {
   }
   call(method, params, timeout = 45000) {
     return new Promise((resolve, reject) => {
-      const id = `nock-${++this.counter}`;
+      const id = `xroam-${++this.counter}`;
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(
@@ -227,7 +228,7 @@ export class Codex extends EventEmitter {
       ws.once("error", () => reject(new Fault(503, "codex_socket", "共有Codexへ接続できません。")));
     });
     this.alive = true;
-    await this.call("initialize", { clientInfo: { name: "nock", title: "Nock", version: "0.2.0" }, capabilities: { experimentalApi: true } });
+    await this.call("initialize", { clientInfo: { name: "xroam", title: "xroam", version }, capabilities: { experimentalApi: true } });
     this.send({ method: "initialized", params: {} });
   }
 }

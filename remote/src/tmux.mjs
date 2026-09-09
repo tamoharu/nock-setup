@@ -15,7 +15,7 @@ export class Tmux {
     try {
       const argv = ["-u", ...(this.socket ? ["-S", this.socket] : []), ...args];
       // A default tmux server may later host unrelated PC terminals. Keep a new
-      // server outside Nock's systemd service cgroup, so restarting Nock cannot
+      // server outside xroam's systemd service cgroup, so restarting xroam cannot
       // terminate those terminals. A transient user scope inherits no API token.
       const scope = process.platform === "linux" && process.env.INVOCATION_ID && args[0] === "new-session";
       return (await exec(scope ? "systemd-run" : this.bin, scope
@@ -29,7 +29,7 @@ export class Tmux {
   }
   async panes() {
     let raw;
-    const separator = "|nock-" + randomBytes(16).toString("hex") + "|";
+    const separator = "|xroam-" + randomBytes(16).toString("hex") + "|";
     try { raw = await this.run(["list-panes", "-a", "-F", fields.map((f) => `#{${f}}`).join(separator)]); }
     catch (e) { if (e.code === "tmux_unavailable") return []; throw e; }
     const rows = raw.split("\n").map((s) => s.split(separator)).filter((a) => a.length === fields.length);

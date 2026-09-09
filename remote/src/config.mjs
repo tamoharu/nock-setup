@@ -71,7 +71,7 @@ export function loadConfig(path) {
       "プロジェクトの設定が不正です。",
     );
   }
-  c.database = resolve(c.dataDir, "nock.sqlite");
+  c.database = resolve(c.dataDir, "xroam.sqlite");
   return c;
 }
 export function authenticate(header, token) {

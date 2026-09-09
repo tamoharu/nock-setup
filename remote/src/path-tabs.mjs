@@ -4,6 +4,7 @@ import { basename, dirname, join, isAbsolute, relative } from "node:path";
 import { threadPermissionOverrides } from "./agent-settings.mjs";
 import { check, requestID, now } from "./config.mjs";
 import { EMPTY_THREAD_NAME } from "./thread-titles.mjs";
+import { repositoryContext, branchDirectory, createBranch } from "./workspace-git.mjs";
 import { conversationSummary } from "./workspace.mjs";
 
 const skipped = new Set(["node_modules", "DerivedData", "vendor", "build", "dist", "Pods"]);
@@ -28,6 +29,20 @@ export function fuzzyScore(value, query) {
 
 export class PathTabs {
   constructor(workspace) { this.w = workspace; }
+  async repository(directory) { return repositoryContext(await directoryPath(directory)); }
+  async createBranch(body) {
+    requestID(body.requestId);
+    return this.w.chat.exclusive(body.requestId, async () => {
+      if (!this.w.store.claim(body.requestId, body.requestId, "branch:create", body))
+        return this.w.store.request(body.requestId);
+      try {
+        const result = await createBranch(await directoryPath(body.directory), body.name, body.baseBranch);
+        return this.w.store.finishRequest(body.requestId, "accepted", result);
+      } catch (error) {
+        return this.w.store.finishRequest(body.requestId, error.status >= 500 ? "unknown" : "rejected", { message: error.message });
+      }
+    });
+  }
   async root() {
     if (this.w.config.searchRoot) return directoryPath(this.w.config.searchRoot);
     // Prefer ~/dev, then a dev ancestor of a configured project (e.g. ~/Sites/dev).
@@ -96,10 +111,10 @@ export class PathTabs {
         } catch { /* Deleted external history is not recreated. */ }
       }
     }
-    // Also repair conversations that have been switched away from or archived
-    // in Nock. Ordinary CLI history and custom names are left alone.
+    // Also update placeholder titles for conversations switched away from or archived
+    // in xroam. Ordinary CLI history and custom names are left alone.
     for (let i = 0; i < result.data.length; i++) {
-      try { result.data[i] = await this.w.titles.repair(c, result.data[i]); }
+      try { result.data[i] = await this.w.titles.update(c, result.data[i]); }
       catch { /* History remains usable if Codex cannot save a name yet. */ }
     }
     return result;
@@ -147,7 +162,9 @@ export class PathTabs {
       }
       check(!old || body.expectedThreadId === (old.threadId ?? null), "stale_thread", "会話が切り替わりました。再同期してください。", 409);
       check(!old || !this.w.chat.requests(id).length, "unknown_request", "送信結果を確認してから切り替えてください。", 409);
-      const directory = await directoryPath(body.directory ?? old?.directory ?? space?.directory ?? await this.root());
+      let directory = await directoryPath(body.directory ?? old?.directory ?? space?.directory ?? await this.root());
+      check(body.branch == null || (!old && !body.threadId), "branch_context", "ブランチは新しいチャットで選択してください。");
+      const baseDirectory = directory;
       const c = await this.w.shared(true);
       if (old?.threadId) {
         const thread = await this.w.chat.readThread(c, old.threadId);
@@ -165,7 +182,10 @@ export class PathTabs {
           "thread_open", "この会話は別のタブで開いています。", 409);
       }
       this.w.store.claim(body.requestId, key, kind, body);
+      let preparingBranch = body.branch != null;
       try {
+        if (body.branch != null) directory = await branchDirectory(directory, body.branch, this.w.config.dataDir);
+        preparingBranch = false;
         if (thread) {
           const resumed = (await c.call("thread/resume", { threadId: thread.id, ...threadPermissionOverrides(body.permissionLevel) })).thread;
           thread = { ...resumed, turns: resumed.turns?.length ? resumed.turns : thread.turns };
@@ -185,7 +205,7 @@ export class PathTabs {
         if (!pane) {
           const sessionId = panes.find((p) => p.sessionId === old?.sessionId && p.epoch === old?.epoch)?.sessionId ?? space?.sessionId;
           const paneId = await this.w.tmux.create({ space: sessionId,
-            name: `nock-${body.requestId.slice(0, 8)}`, directory });
+            name: `xroam-${body.requestId.slice(0, 8)}`, directory });
           pane = (await this.w.tmux.panes()).find((p) => p.paneId === paneId);
         }
         check(pane, "terminal_unknown", "端末の作成結果を確認できません。", 503);
@@ -196,7 +216,7 @@ export class PathTabs {
         const tabNumber = old?.tabNumber ?? String(Math.max(0, ...siblings.map((t) => Number(t.tabNumber) || 0)) + 1);
         const customName = old?.customName;
         const tab = { ...compact(pane), id: key, name: customName ?? tabNumber, tabNumber, customName, directory,
-          pathTab: true, threadId: thread.id, permissionLevel: selectedThread ? body.permissionLevel ?? remembered?.permissionLevel ?? null : permissionLevel || null, model: thread.model, effort: thread.reasoningEffort, history,
+          pathTab: true, baseDirectory: old?.baseDirectory ?? old?.directory ?? space?.baseDirectory ?? space?.directory ?? baseDirectory, threadId: thread.id, permissionLevel: selectedThread ? body.permissionLevel ?? remembered?.permissionLevel ?? null : permissionLevel || null, model: thread.model, effort: thread.reasoningEffort, history,
           contexts: contexts.filter((p, i) => p.directory !== directory && contexts.findIndex((v) => v.directory === p.directory) === i).map(compact),
           ...conversationSummary(thread), archived: false, updatedAt: now(), lastPathRequest: body.requestId };
         this.w.save(tab);
@@ -204,7 +224,7 @@ export class PathTabs {
         await this.w.refreshLayout();
         return receipt;
       } catch (e) {
-        return this.w.store.finishRequest(body.requestId, e.code === "codex_rejected" ? "rejected" : "unknown", { message: e.message });
+        return this.w.store.finishRequest(body.requestId, preparingBranch || e.code === "codex_rejected" ? "rejected" : "unknown", { message: e.message });
       }
     });
   }
@@ -222,7 +242,7 @@ export class PathTabs {
       const command = target.pathTab ? undefined
         : [this.w.config.codexBin, "resume", "--no-alt-screen", "--remote", `unix://${this.w.socket}`, target.threadId];
       const space = panes.find((p) => p.sessionId === target.sessionId && p.epoch === target.epoch)?.sessionId;
-      const paneId = await this.w.tmux.create({ space, name: `nock-${requestId.slice(0, 8)}`, directory, command });
+      const paneId = await this.w.tmux.create({ space, name: `xroam-${requestId.slice(0, 8)}`, directory, command });
       pane = (await this.w.tmux.panes()).find((p) => p.paneId === paneId && !p.dead);
       check(pane, "terminal_unknown", "端末の作成結果を確認できません。", 503);
     }

@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { createHash } from "node:crypto";
 import { SharedChat } from "./shared-chat.mjs";
-import { PathTabs } from "./path-tabs.mjs";
+import { PathTabs, directoryPath } from "./path-tabs.mjs";
 import { CodeBrowser } from "./code-browser.mjs";
 import { Attachments } from "./attachments.mjs";
 import { threadPermissionOverrides } from "./agent-settings.mjs";
@@ -49,7 +49,7 @@ export class Workspace {
     this.code = new CodeBrowser(this);
     this.attachments = new Attachments(store, join(config.dataDir, "attachments"));
     this.socket = join(config.dataDir, "codex.sock");
-    this.controlName = "nock-control-" + createHash("sha256").update(this.socket).digest("hex").slice(0, 10);
+    this.controlName = "xroam-control-" + createHash("sha256").update(this.socket).digest("hex").slice(0, 10);
     this.snapshot = { spaces: [], agents: [], syncedAt: null, error: null };
     this.store.db.exec("CREATE TABLE IF NOT EXISTS terminal_tabs(id TEXT PRIMARY KEY,data TEXT NOT NULL)");
     this.store.db.exec("CREATE TABLE IF NOT EXISTS workspace_spaces(id TEXT PRIMARY KEY,data TEXT NOT NULL)");
@@ -64,7 +64,7 @@ export class Workspace {
     if (this.connecting) return this.connecting;
     if (!existsSync(this.socket) && !create) return null;
     this.connecting = (async () => {
-      check(Buffer.byteLength(this.socket) < 100, "socket_path", "Nockデータディレクトリのパスを短くしてください。");
+      check(Buffer.byteLength(this.socket) < 100, "socket_path", "xroamデータディレクトリのパスを短くしてください。");
       if (!existsSync(this.socket)) {
         await this.tmux.create({ name: this.controlName, directory: this.config.projects[0].path,
           command: [this.config.codexBin, "app-server", "--listen", `unix://${this.socket}`] });
@@ -80,7 +80,7 @@ export class Workspace {
       await c.start();
       if (this.closed) { c.stop(); return null; }
       this.client = c;
-      // Only reconnect threads explicitly created by Nock, never arbitrary CLI history.
+      // Only reconnect threads explicitly created by xroam, never arbitrary CLI history.
       // No turn/start here, and no sandbox/approval/model overrides on resume.
       for (const t of this.records().filter((t) => t.threadId && !t.archived)) {
         try { await c.call("thread/resume", { threadId: t.threadId }, 8000); } catch { /* Visible as unknown in snapshot. */ }
@@ -139,9 +139,9 @@ export class Workspace {
           try {
             const thread = await this.chat.readThread(c, t.threadId);
             if (this.closed) return this.snapshot;
-            // Repairs desktop as well as mobile turns, including missed events
+            // Updates desktop as well as mobile thread titles, including missed events
             // after a daemon restart. A naming failure must not hide run status.
-            try { await this.titles.repair(c, thread); } catch { /* Retry on the next refresh. */ }
+            try { await this.titles.update(c, thread); } catch { /* Retry on the next refresh. */ }
             if (this.closed) return this.snapshot;
             if (this.records().find((r) => r.id === t.id)?.threadId !== t.threadId) continue;
             const state = threadState(thread, t.state), lastTurn = thread.turns?.at(-1);
@@ -184,7 +184,7 @@ export class Workspace {
     try {
       const [all, processes] = await Promise.all([this.tmux.panes(), this.tmux.processes()]);
       if (this.closed) return this.snapshot;
-      const panes = all.filter((p) => !p.sessionName.startsWith("nock-control-"));
+      const panes = all.filter((p) => !p.sessionName.startsWith("xroam-control-"));
       const c = this.client ? this.client.alive : this.observerAvailable;
       const current = this.records(), spaces = new Map(), agents = [];
       const metadata = new Map(this.store.db.prepare("SELECT id,data FROM workspace_spaces").all().map((r) => [r.id, JSON.parse(r.data)]));
@@ -205,7 +205,8 @@ export class Workspace {
         const settings = metadata.get(spaceId);
         const space = spaces.get(spaceId) ?? { id: spaceId, sessionId: p.sessionId, epoch: p.epoch,
           name: settings?.customName ?? (basename(p.directory) || p.directory), customName: settings?.customName ?? null,
-          archived: settings?.archived ?? false, directory: p.directory, tabs: [] };
+          archived: settings?.archived ?? false, directory: p.directory,
+          baseDirectory: owned?.baseDirectory ?? p.directory, tabs: [] };
         tab.tabNumber = owned?.tabNumber ?? String(Math.max(0,
           ...this.records().filter((r) => r.sessionId === p.sessionId && r.epoch === p.epoch).map((r) => Number(r.tabNumber) || 0)) + 1);
         tab.customName = owned?.customName ?? null;
@@ -243,7 +244,9 @@ export class Workspace {
         check(space, "space_stale", "Spaceが見つかりません。再同期してください。", 409);
       }
       const project = this.config.projects.find((p) => p.id === body.projectId);
-      const directory = space?.directory ?? project?.path;
+      const directory = body.directory !== undefined
+        ? await directoryPath(body.directory)
+        : space?.directory ?? project?.path;
       check(directory, "project", "新しいSpaceの作業場所を選んでください。");
       let threadId = null, command;
       if (body.kind === "codex") {
@@ -279,29 +282,8 @@ export class Workspace {
       const matches = this.records().filter((r) => r.epoch === p.epoch && r.paneId === p.paneId && r.panePid === p.panePid);
       const existing = matches.find((r) => r.threadId && !r.archived) ?? matches.find((r) => r.threadId) ?? matches[0];
       if (existing?.threadId) {
-        // Old Nock forced workspace-write/on-request without recording a choice.
-        // Repair only those legacy registrations when the user opens them again.
-        const permissions = {};
-        if (!Object.hasOwn(existing, "permissionLevel")) {
-          const { config } = await c.call("config/read", { cwd: p.directory, includeLayers: false });
-          if (config.approval_policy != null) permissions.approvalPolicy = config.approval_policy;
-          if (config.approvals_reviewer != null) permissions.approvalsReviewer = config.approvals_reviewer;
-          if (config.default_permissions != null) permissions.permissions = config.default_permissions;
-          else if (config.sandbox_mode === "danger-full-access") permissions.sandboxPolicy = { type: "dangerFullAccess" };
-          else if (config.sandbox_mode === "read-only") permissions.sandboxPolicy = { type: "readOnly" };
-          else if (config.sandbox_mode === "workspace-write") {
-            const policy = config.sandbox_workspace_write ?? {};
-            permissions.sandboxPolicy = { type: "workspaceWrite", writableRoots: policy.writable_roots ?? [],
-              networkAccess: policy.network_access ?? false, excludeTmpdirEnvVar: policy.exclude_tmpdir_env_var ?? false,
-              excludeSlashTmp: policy.exclude_slash_tmp ?? false };
-          }
-        }
         await c.call("thread/resume", { threadId: existing.threadId });
-        if (Object.keys(permissions).length) {
-          // Resume ignores overrides for an already-loaded shared thread.
-          await c.call("thread/settings/update", { threadId: existing.threadId, ...permissions });
-        }
-        this.save({ ...existing, permissionLevel: existing.permissionLevel ?? null, archived: false });
+        this.save({ ...existing, archived: false });
         return this.store.finishRequest(body.requestId, "accepted", { tabId: existing.id, threadId: existing.threadId, socket: this.socket });
       }
       const { thread } = await c.call("thread/start", { historyMode: "legacy", cwd: p.directory, ...threadPermissionOverrides(body.permissionLevel) });

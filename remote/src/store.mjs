@@ -222,13 +222,13 @@ export class Store {
       const payload = {
         aps: {
           alert: {
-            title: "Nock",
+            title: "xroam",
             body: `${projectName} · ${session.name} · ${status}`.slice(0, 220),
           },
           sound: "default",
           "thread-id": session.id,
         },
-        nock: {
+        xroam: {
           serverId: this.serverId,
           hostId: d.host,
           sessionId: session.id,

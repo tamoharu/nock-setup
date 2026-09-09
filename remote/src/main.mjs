@@ -10,7 +10,7 @@ import { version } from "./version.mjs";
 
 process.umask(0o077);
 try {
-  const path = process.argv[2] ?? process.env.NOCK_CONFIG;
+  const path = process.argv[2] ?? process.env.XROAM_CONFIG;
   if (!path)
     throw new Error("起動方法: node src/main.mjs /absolute/path/config.json");
   const config = loadConfig(path);
@@ -33,10 +33,10 @@ try {
     service.queue.start();
     worker.start();
     void service.herdr.start();
-    console.log(`Nock ${version}: 127.0.0.1:${config.port} (Codex 0.153.4)`);
+    console.log(`xroam ${version}: 127.0.0.1:${config.port} (Codex 0.153.4)`);
   });
   server.on("error", () => {
-    console.error("Nock: localhostポートを開けません。");
+    console.error("xroam: localhostポートを開けません。");
     shutdown();
   });
   let closing = false;
@@ -58,6 +58,6 @@ try {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 } catch (e) {
-  console.error(`Nock: ${e.code ?? "configuration"} — ${e.message}`);
+  console.error(`xroam: ${e.code ?? "configuration"} — ${e.message}`);
   process.exitCode = 1;
 }
