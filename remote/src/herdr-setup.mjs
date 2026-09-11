@@ -4,18 +4,18 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { HerdrRPC, herdrSettingsPath } from "./herdr.mjs";
 
-const begin = "# >>> xroam agents (xroam herdr disable で元に戻す)";
-const end = "# <<< xroam agents";
+const begin = "# >>> hati agents (hati herdr disable で元に戻す)";
+const end = "# <<< hati agents";
 export const HERDR_ROWS = `${begin}
 [ui.sidebar.agents]
 row_gap = 0
 rows = [
-  ["state_icon", "$xroam_state", "$xroam_elapsed"],
-  ["agent", { token = "$xroam_host", dim = true }],
+  ["state_icon", "$hati_state", "$hati_elapsed"],
+  ["agent", { token = "$hati_host", dim = true }],
   [{ token = "workspace", bold = true }],
-  ["$xroam_tab"],
-  ["$xroam_query1"],
-  ["$xroam_query2"],
+  ["$hati_tab"],
+  ["$hati_query1"],
+  ["$hati_query2"],
 ]
 ${end}
 `;
@@ -35,14 +35,14 @@ function setKey(text, section, key, line) {
 }
 
 export function installHerdrConfig(before) {
-  if (before.includes(begin)) throw new Error("xroamの表示設定がすでにあります。xroam herdr disable で解除してください。");
+  if (before.includes(begin)) throw new Error("hatiの表示設定がすでにあります。hati herdr disable で解除してください。");
   // Preserve complete agent tables, including per-agent row overrides, for uninstall.
   const removed = sections(before).filter((s) => s.name === "ui.sidebar.agents" || s.name.startsWith("ui.sidebar.agents."));
   let text = before;
   for (const s of removed.toReversed()) text = text.slice(0, s.start) + text.slice(s.end);
   const keys = [];
   for (const [section, key, value] of [["ui", "sidebar_max_width", "40"], ["theme.custom", "yellow", '"#FF9500"']]) {
-    const line = `${key} = ${value} # xroam agents`;
+    const line = `${key} = ${value} # hati agents`;
     const change = setKey(text, section, key, line); text = change.text;
     keys.push({ section, key, line, old: change.old, created: change.created });
   }
@@ -54,7 +54,7 @@ export function restoreHerdrConfig(current, receipt) {
   if (current === receipt.installed) return receipt.before;
   const start = current.indexOf(begin), finish = current.indexOf(end, start);
   if (start < 0 || finish < 0 || current.slice(start, finish + end.length).trim() !== HERDR_ROWS.trim())
-    throw new Error("xroamの表示設定が手動変更されています。herdr-install.json のバックアップと設定を確認してください。");
+    throw new Error("hatiの表示設定が手動変更されています。herdr-install.json のバックアップと設定を確認してください。");
   let text = current.slice(0, start) + current.slice(finish + end.length).replace(/^\r?\n/, "");
   for (const change of receipt.keys) {
     const table = sections(text).find((s) => s.name === change.section);
@@ -73,7 +73,7 @@ function atomicWrite(path, text) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   // Follow the existing config symlink, then atomically replace its target.
   const target = existsSync(path) ? realpathSync(path) : path;
-  const temporary = `${target}.xroam-${randomUUID()}`;
+  const temporary = `${target}.hati-${randomUUID()}`;
   try { writeFileSync(temporary, text, { mode: 0o600, flag: "wx" }); renameSync(temporary, target); }
   finally { if (existsSync(temporary)) unlinkSync(temporary); }
 }
@@ -95,7 +95,7 @@ export async function enableHerdr(config, options = {}) {
       writeJSON(herdrSettingsPath(config), { enabled: true, ...receipt.settings });
       return { configPath: receipt.configPath, alreadyInstalled: true };
     }
-    throw new Error("前回のHerdr設定バックアップがあります。xroam herdr disable で状態を確認してください。");
+    throw new Error("前回のHerdr設定バックアップがあります。hati herdr disable で状態を確認してください。");
   }
   const configPath = resolve(options.configPath || process.env.HERDR_CONFIG_PATH || join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "herdr/config.toml"));
   const settings = { socketPath: resolve(options.socketPath || process.env.HERDR_SOCKET_PATH || join(dirname(configPath), "herdr.sock")), hostName: options.hostName || null };

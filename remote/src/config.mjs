@@ -1,5 +1,5 @@
 import { readFileSync, statSync, mkdirSync, realpathSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, relative, join, sep } from "node:path";
 import { createHash, timingSafeEqual } from "node:crypto";
 
 export const CODEX_VERSION = "0.153.4";
@@ -71,8 +71,48 @@ export function loadConfig(path) {
       "プロジェクトの設定が不正です。",
     );
   }
-  c.database = resolve(c.dataDir, "xroam.sqlite");
+  c.database = resolve(c.dataDir, "hati.sqlite");
+  check(c.directoryMigrations === undefined || Array.isArray(c.directoryMigrations), "config", "directoryMigrations は配列で指定してください。");
+  c.directoryMigrations = (c.directoryMigrations ?? []).map((entry) => {
+    check(entry && typeof entry.from === "string" && typeof entry.to === "string" && isAbsolute(entry.from) && isAbsolute(entry.to), "config", "移行元・移行先には絶対パスが必要です。");
+    const from = resolve(entry.from), to = realpathSync(entry.to);
+    check(from !== to && statSync(to).isDirectory(), "config", "移行先のディレクトリを確認してください。");
+    return { from, to };
+  });
+  check(new Set(c.directoryMigrations.map((m) => m.from)).size === c.directoryMigrations.length &&
+    !c.directoryMigrations.some((m) => c.directoryMigrations.some((n) => within(n.from, m.to) !== null)),
+    "config", "ディレクトリ移行の重複・連鎖は指定できません。");
   return c;
+}
+
+function within(root, path) {
+  const suffix = relative(root, path);
+  return suffix === ".." || suffix.startsWith(".." + sep) || isAbsolute(suffix) ? null : suffix;
+}
+// A moved project's existing rollouts keep their original cwd. Resolve only
+// explicitly configured moves, without rewriting messages or Codex's indexes.
+export function migratedDirectory(config, directory) {
+  if (typeof directory !== "string") return directory;
+  for (const move of [...(config.directoryMigrations ?? [])].sort((a, b) => b.from.length - a.from.length)) {
+    const suffix = within(move.from, directory);
+    if (suffix !== null) return join(move.to, suffix);
+  }
+  return directory;
+}
+export function historyDirectories(config, directory) {
+  const current = migratedDirectory(config, directory), paths = [current];
+  for (const move of config.directoryMigrations ?? []) {
+    const suffix = within(move.to, current);
+    if (suffix !== null) {
+      const previous = join(move.from, suffix);
+      if (migratedDirectory(config, previous) === current) paths.push(previous);
+    }
+  }
+  const unique = [...new Set(paths)];
+  return unique.length === 1 ? unique[0] : unique;
+}
+export function migrationCwd(config, directory) {
+  return Array.isArray(historyDirectories(config, directory)) ? { cwd: migratedDirectory(config, directory) } : {};
 }
 export function authenticate(header, token) {
   const hash = (s) => createHash("sha256").update(s).digest();

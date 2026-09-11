@@ -1,4 +1,4 @@
-// Codex turn timestamps are seconds; xroam snapshots use milliseconds. Keep
+// Codex turn timestamps are seconds; hati snapshots use milliseconds. Keep
 // timing tied to a turn so a new response never inherits the previous duration.
 const nonnegative = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 export function runTiming(turn, previous, { startedAt, completedAt } = {}) {

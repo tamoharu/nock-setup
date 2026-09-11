@@ -69,6 +69,6 @@ export function subagentPage({ parentThreadId, reference, thread, before = Numbe
     items: page,
     hasMore,
     nextBefore: hasMore ? page[0].position : null,
-    historyLimited: !!thread?._xroamHistoryLimited || !!thread?._xroamRolloutFallback,
+    historyLimited: !!thread?._hatiHistoryLimited || !!thread?._hatiRolloutFallback,
   };
 }

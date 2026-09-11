@@ -20,23 +20,23 @@ import { verifyCodex } from "./codex.mjs";
 import { version } from "./version.mjs";
 
 export const appRoot =
-  process.env.XROAM_APP_ROOT ||
+  process.env.HATI_APP_ROOT ||
   resolve(dirname(fileURLToPath(import.meta.url)), "..");
-export function locations(root = process.env.XROAM_HOME) {
+export function locations(root = process.env.HATI_HOME) {
   if (root)
     check(
       isAbsolute(root),
       "setup_path",
-      "XROAM_HOMEは絶対パスで指定してください。",
+      "HATI_HOMEは絶対パスで指定してください。",
     );
   const configDir = root
     ? join(root, "config")
-    : join(homedir(), ".config/xroam");
+    : join(homedir(), ".config/hati");
   return {
     configDir,
     configFile: join(configDir, "config.json"),
-    dataDir: root ? join(root, "data") : join(homedir(), ".local/share/xroam"),
-    workspace: root ? join(root, "projects") : join(homedir(), "xroamProjects"),
+    dataDir: root ? join(root, "data") : join(homedir(), ".local/share/hati"),
+    workspace: root ? join(root, "projects") : join(homedir(), "hatiProjects"),
   };
 }
 export function writeConfig(path, config) {
@@ -92,7 +92,7 @@ export function ensureSetup({
       enabled: false,
       teamId: "",
       keyId: "",
-      bundleId: "com.deep.xroam",
+      bundleId: "com.deep.hati",
       keyFile: join(paths.configDir, "AuthKey.p8"),
     },
   };
@@ -135,7 +135,7 @@ const systemdQuote = (s) =>
   '"';
 export function serviceDefinition({
   platform = process.platform,
-  node = process.env.XROAM_NODE_BIN || process.execPath,
+  node = process.env.HATI_NODE_BIN || process.execPath,
   main = join(appRoot, "src/cli.mjs"),
   configFile,
   dataDir,
@@ -143,15 +143,15 @@ export function serviceDefinition({
 }) {
   const args = [node, main, "run", "--config", configFile];
   if (platform === "darwin")
-    return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>com.deep.xroam.daemon</string><key>ProgramArguments</key><array>${args.map((a) => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>5</integer><key>Umask</key><integer>63</integer><key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(path)}</string></dict><key>StandardOutPath</key><string>${xml(join(dataDir, "service.log"))}</string><key>StandardErrorPath</key><string>${xml(join(dataDir, "service.log"))}</string></dict></plist>\n`;
+    return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>com.deep.hati.daemon</string><key>ProgramArguments</key><array>${args.map((a) => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer><key>Umask</key><integer>63</integer><key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(path)}</string></dict><key>StandardOutPath</key><string>${xml(join(dataDir, "service.log"))}</string><key>StandardErrorPath</key><string>${xml(join(dataDir, "service.log"))}</string></dict></plist>\n`;
   check(platform === "linux", "platform", "macOS / Linuxに対応しています。");
-  return `[Unit]\nDescription=xroam personal Codex controller\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${args.map(systemdQuote).join(" ")}\nEnvironment=${systemdQuote("PATH=" + path)}\nRestart=on-failure\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=15\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
+  return `[Unit]\nDescription=hati personal Codex controller\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${args.map(systemdQuote).join(" ")}\nEnvironment=${systemdQuote("PATH=" + path)}\nRestart=always\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=15\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`;
 }
 function manager(command, args, required = true) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 20000 });
   if (required && result.status !== 0)
     throw new Error(
-      `${command}による常駐設定に失敗しました。xroam doctor で確認してください。`,
+      `${command}による常駐設定に失敗しました。hati doctor で確認してください。`,
     );
   return result.status === 0;
 }
@@ -183,21 +183,21 @@ export async function reloadProjects(config) {
   check(
     response.ok,
     "reload",
-    "追加内容は保存しましたが反映できませんでした。作業終了後にxroam restartを実行してください。",
+    "追加内容は保存しましたが反映できませんでした。作業終了後にhati restartを実行してください。",
   );
   return true;
 }
 export async function startService(paths, config) {
   check(
-    !process.env.XROAM_HOME,
+    !process.env.HATI_HOME,
     "test_root",
-    "XROAM_HOME指定時はOSの常駐登録を行いません。runを直接実行してください。",
+    "HATI_HOME指定時はOSの常駐登録を行いません。runを直接実行してください。",
   );
   if (await daemonHealth(config)) return { alreadyRunning: true };
   check(
     !(await tcpAvailable(config.port)),
     "port_in_use",
-    "APIポートが別のプロセスに使用されています。既存プロセスは停止していません。xroam doctorで設定を確認してください。",
+    "APIポートが別のプロセスに使用されています。既存プロセスは停止していません。hati doctorで設定を確認してください。",
   );
   verifyCodex(config.codexBin);
   const definition = serviceDefinition({
@@ -206,18 +206,18 @@ export async function startService(paths, config) {
   });
   if (process.platform === "darwin") {
     const dir = join(homedir(), "Library/LaunchAgents"),
-      file = join(dir, "com.deep.xroam.daemon.plist");
+      file = join(dir, "com.deep.hati.daemon.plist");
     mkdirSync(dir, { recursive: true });
     writeFileSync(file, definition, { mode: 0o600 });
     const target = `gui/${process.getuid()}`;
-    manager("launchctl", ["bootout", `${target}/com.deep.xroam.daemon`], false);
+    manager("launchctl", ["bootout", `${target}/com.deep.hati.daemon`], false);
     manager("launchctl", ["bootstrap", target, file]);
   } else {
     const dir = join(homedir(), ".config/systemd/user");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(join(dir, "xroam.service"), definition, { mode: 0o600 });
+    writeFileSync(join(dir, "hati.service"), definition, { mode: 0o600 });
     manager("systemctl", ["--user", "daemon-reload"]);
-    manager("systemctl", ["--user", "enable", "--now", "xroam.service"]);
+    manager("systemctl", ["--user", "enable", "--now", "hati.service"]);
     if (
       !manager(
         "loginctl",
@@ -235,22 +235,22 @@ export async function startService(paths, config) {
     await delay(300);
   }
   throw new Error(
-    "常駐の起動を確認できません。xroam doctor とサービスログを確認してください。",
+    "常駐の起動を確認できません。hati doctor とサービスログを確認してください。",
   );
 }
 export function stopService() {
   check(
-    !process.env.XROAM_HOME,
+    !process.env.HATI_HOME,
     "test_root",
-    "XROAM_HOME指定時はOSの常駐登録を変更しません。",
+    "HATI_HOME指定時はOSの常駐登録を変更しません。",
   );
   if (process.platform === "darwin")
     manager(
       "launchctl",
-      ["bootout", `gui/${process.getuid()}/com.deep.xroam.daemon`],
+      ["bootout", `gui/${process.getuid()}/com.deep.hati.daemon`],
       false,
     );
-  else manager("systemctl", ["--user", "disable", "--now", "xroam.service"]);
+  else manager("systemctl", ["--user", "disable", "--now", "hati.service"]);
 }
 async function tcpAvailable(port = 22) {
   return new Promise((resolve) => {

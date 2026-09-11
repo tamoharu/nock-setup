@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
-import { check } from "./config.mjs";
+import { check, migratedDirectory } from "./config.mjs";
 
 const CATEGORIES = new Set(["all", "chat", "tab", "space", "file", "code"]);
 const SKIP_DIRECTORIES = new Set([".git", "node_modules", ".build", "build", "DerivedData", ".next", ".venv", "__pycache__"]);
@@ -102,10 +102,11 @@ export class GlobalSearch {
                 if (seenThreads.has(thread.id)) continue;
                 seenThreads.add(thread.id);
                 const tab = [...tabs.values()].find(t => t.threadId === thread.id);
-                const space = spaces.find(s => s.directory === thread.cwd);
+                const directory = migratedDirectory(this.service.config, thread.cwd);
+                const space = spaces.find(s => s.directory === directory);
                 yield { ...(tab ? context(tab) : {}), id: `chat:${thread.id}`, kind: "chat",
                   title: thread.name || thread.preview || "チャット", snippet: excerpt(snippet || thread.preview, q),
-                  threadId: thread.id, directory: thread.cwd, spaceId: space?.id, spaceName: space?.customName ?? space?.name ?? basename(thread.cwd ?? ""),
+                  threadId: thread.id, directory, spaceId: space?.id, spaceName: space?.customName ?? space?.name ?? basename(directory ?? ""),
                   updatedAt: (thread.updatedAt ?? 0) * 1000 };
               }
               const next = page.nextCursor;

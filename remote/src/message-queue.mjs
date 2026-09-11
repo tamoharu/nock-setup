@@ -19,7 +19,7 @@ export class MessageQueue {
     const old = this.store.request(body.requestId);
     if (old) { this.store.claim(body.requestId, id, "queue:add", body); return old; }
     const target = this.target(id, shared);
-    check(!target.archived && target.threadId && body.expectedThreadId === target.threadId, "stale_thread", "会話を同期してからキューに追加してください。", 409);
+    check(!target.archived && !target.closedAt && !target.closeRequestId && target.threadId && body.expectedThreadId === target.threadId, "stale_thread", "会話を同期してからキューに追加してください。", 409);
     permissionOverrides(body.permissionLevel);
     messageInput(this.service.attachments, body, id, target.threadId);
     check(this.list(id).length < 20, "queue_full", "キューは20件までです。");
@@ -51,6 +51,10 @@ export class MessageQueue {
     return { updated: true };
   }
   start() { this.timer = setInterval(() => { this.tick().catch(() => {}); }, 1000); this.timer.unref(); }
+  pauseTab(id) {
+    for (const row of this.rows().filter((r) => r.sessionId === id && r.status === "queued"))
+      this.save({ ...row, status: "failed", error: "タブを閉じたため送信を停止しました。本文は保持されています。" });
+  }
   close() { this.closed = true; clearInterval(this.timer); }
   async tick() {
     if (this.running || this.closed) return;
@@ -68,11 +72,12 @@ export class MessageQueue {
         }
         try {
           const target = this.target(row.sessionId, row.shared);
-          check(target.threadId === row.body.expectedThreadId && !target.archived, "stale_thread", "会話が変更されたためキューを停止しました。", 409);
+          check(target.threadId === row.body.expectedThreadId && !target.archived && !target.closedAt && !target.closeRequestId,
+            "stale_thread", "会話が変更または終了されたためキューを停止しました。", 409);
           if (row.shared) {
             const c = await this.service.workspace.shared();
             if (!c?.alive) continue;
-            const thread = await this.service.workspace.chat.readThread(c, target.threadId);
+            const thread = await this.service.workspace.chat.readStatus(c, target.threadId);
             if (thread.status?.type !== "idle") continue;
           } else if (["starting", "running", "waiting"].includes(target.state)) continue;
           // Shared-thread checks await RPCs; edits or deletion can happen meanwhile.

@@ -1,27 +1,37 @@
-# xroamへの名称統一
+# Hati への名称統一
 
-2026-09-10。表示名・実行名は `xroam`、Swift型・共通パッケージは `Xroam…`、環境変数は `XROAM_…` に統一する。PCとiPhoneの識別子も変わるため、既存環境では以下の切替が必要。
+表示名は `Hati`、コマンドと保存先は `hati`、Swift型・パッケージは `Hati…`、環境変数は `HATI_…` に統一します。
 
-| 対象 | 新しい名前・場所 |
+| 対象 | 名前・場所 |
 | --- | --- |
-| Bundle ID・APNs topic | `com.deep.xroam` |
-| PCコマンド・npmパッケージ | `xroam` / `xroam-daemon` |
-| ユーザー常駐 | `com.deep.xroam.daemon`（macOS）、`xroam.service`（Linux） |
-| PC設定・状態 | `~/.config/xroam` / `~/.local/share/xroam` |
-| SQLite・初期プロジェクト | `xroam.sqlite` / `~/xroamProjects` |
-| 環境変数 | `XROAM_HOME`、`XROAM_CONFIG`、`XROAM_APP_ROOT`、`XROAM_NODE_BIN` など |
-| QR・端末鍵の形式 | `xroam://pair/…` / `xroam-ed25519-v1:…` |
-| 通知payloadのキー | `xroam` |
-| iOS保存先・Keychain service | `Application Support/xroam` / `xroam.credentials.v1` |
-| Herdr source・表示用変数 | `xroam.agents` / `$xroam_…` |
+| iOSアプリ・共通パッケージ | `Hati` / `HatiCore` |
+| iOS Bundle ID・APNs topic | `com.deep.hati` |
+| macOS Bundle ID | `com.deep.hati.desktop` |
+| PCコマンド・Rustバイナリ | `hati` / `hati-tui` |
+| npmパッケージ | `hati-daemon` / `hati-desktop` |
+| Homebrew tap・Formula | `tamoharu/hati` / `hati`（Rubyクラス `Hati`） |
+| ユーザー常駐 | `com.deep.hati.daemon` / `hati.service` |
+| PC設定・状態・DB | `~/.config/hati` / `~/.local/share/hati` / `hati.sqlite` |
+| QR・端末鍵の形式 | `hati://pair/…` / `hati-ed25519-v1:…` |
+| 通知payloadのキー | `hati` |
+| iOS保存先・Keychain service | `Application Support/hati` / `hati.credentials.v1` |
+| CLI状態 | `~/.local/share/hati-cli/state.json` |
+| Desktop状態 | macOS `~/Library/Application Support/hati-desktop`、Linux `~/.config/hati-desktop` |
+| Electron内部scheme・IPC | `hati-app` / `hati:*` / `window.hati` |
+| Herdr source | `hati.agents` |
+| 電源ヘルパー | `com.deep.hati.power`（実装の定義を参照） |
 
-## 切替手順
+## 既存環境の切替
 
-1. 管理対象の作業を完了させる。旧版で通知登録を解除し、Herdr連携を有効にしていた場合は旧版の解除コマンドで元の表示へ戻す。設定・APIトークン・状態ディレクトリ・SQLite・添付ファイルをバックアップし、旧常駐を停止する。旧サービスの自動起動設定もバックアップ先へ移し、次回ログイン時の二重起動を防ぐ。プロジェクトのファイルやCodexのログイン情報は保持する。
-2. `brew install tamoharu/xroam/xroam` で新名称のPC側を導入する。新規設定なら `xroam setup --no-pair`。状態を引き継ぐ場合は、**常駐停止中に**旧設定と状態のコピーを新しい保存先へ用意する。コピーしたSQLiteを `xroam.sqlite` に変更し、WALがある場合は対応する `-wal` / `-shm` も同じ名前に揃える。SQLiteのオンラインバックアップを使った一貫したコピーでもよい。元データは検証完了まで保持する。`attachments` もコピーする。実行中プロセスの `codex.sock` はコピーしない。
-3. コピーした `config.json` の `dataDir`・`tokenFile`・`codexBin`・`apns.keyFile` を実際の新しい絶対パスへ、`apns.bundleId` を `com.deep.xroam` へ変更する。プロジェクトの `id` は保持する。作業フォルダ自体を改名した場合は `projects[].path` も実際の新しいパスに揃える。トークンは600、設定・状態ディレクトリは700を保つ。Herdrは旧版で復元を完了させ、新環境では `xroam herdr enable` で設定し直す。旧 `herdr-install.json`・`herdr.json` を有効設定としてコピーしない。
-4. `xroam setup --no-pair` で新しい常駐を登録し、`xroam doctor` で稼働版を確認する。同じポートを使うため、新旧常駐を同時に起動しない。名前や保存場所が変わるので、共有Codexの監視セッションは作業完了後に新CLIで作り直す。既存の一般tmuxセッションは変更しない。
-5. iPhoneへ新Bundle IDのアプリを署名して導入する。Apple Developer側でApp ID・Push Notifications・プロビジョニングを新Bundle IDに揃える。新アプリは別のアプリコンテナとKeychain serviceを使い、旧アプリの鍵・接続先・下書き・テーマを自動移行しない。必要な下書きを退避したうえで `xroam pair` のQRで接続し直し、通知を再登録する。
-6. 会話履歴・プロジェクト・SSH・通知・Herdrを確認してから旧インストールを整理する。SSHの既存公開鍵は自動削除しない。取り消す鍵は登録元を確認して個別に削除する。旧アプリとバックアップは引継ぎ確認まで保持する。
+名称と永続化識別子が変わるため、新規セットアップの前に既存データを移します。空の常駐を別途起動してはいけません。
 
-旧名称の互換エイリアス、旧QRの受付、旧通知キーのフォールバックは設けない。PCとiPhoneを同時に切り替える。表示名だけを変える更新とは異なり、Bundle IDと永続化の識別子にも変更がある。
+1. 設定、APIトークン、SQLite、添付、デスクトップの状態・背景を私有バックアップへ保存します。SQLiteはオンラインバックアップ、または常駐停止後の一貫したコピーを使用します。送信結果が不明な要求のIDと本文も保持します。
+2. 通常セッションに実行中・承認待ちの作業がないことを確認して旧ユーザー常駐だけを停止し、旧自動起動定義を退避します。共有Codex、tmuxサーバー、一般ペインは終了しません。
+3. 設定・状態を新しい保存先へ移し、DB名、`dataDir`、`tokenFile`、`codexBin`、APNs topic・鍵ファイルのパスを更新します。サーバー・プロジェクト・タブ・会話ID、要求IDと本文、トークン、SSH鍵は保持します。実行中の共有Codexを引き継ぐ場合は、同じソケットを維持し、新しいapp-serverを作りません。
+4. 作業フォルダも改名する場合は `projects[].path` と `directoryMigrations` を更新します。過去の会話のcwd・本文・要求記録は書き換えず、明示した移行元から現行パスへ対応づけます。履歴を引き継ぐため、利用者の移行設定には以前の実パスが残ることがあります。
+5. `hati setup --no-pair` で新常駐を登録し、`hati doctor`、serverId、タブとペインのID/PID、履歴件数を照合します。新旧常駐を同時に起動しません。
+6. デスクトップの状態と背景を新しい保存先へ移し、ローカル接続のconfigPathだけを更新します。下書きや未確認要求の本文は置換しません。新しいアプリを起動し、既存の会話を読み取りで確認します。
+7. iPhoneは新Bundle IDの別アプリです。旧アプリのコンテナ・Keychainを削除せず保持します。新アプリで `hati pair` のQRから接続し直します。端末内の鍵、下書き、外観は自動移行されません。通知は新App ID・プロビジョニングとAPNs設定を揃えて再登録します。
+8. 旧SSH鍵や旧アプリの削除は、引継ぎを確認してから個別に行います。管理者権限が必要な電源ヘルパーは旧設定の復元後、新名称で導入します。
+
+旧QR・通知キー・コマンドの互換エイリアスは追加しません。制御セッションの終了防止は製品名に依存しない予約名で保護します。

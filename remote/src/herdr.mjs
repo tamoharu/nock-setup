@@ -7,9 +7,9 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 
 const execute = promisify(execFile);
-export const HERDR_SOURCE = "xroam.agents";
+export const HERDR_SOURCE = "hati.agents";
 export const herdrSettingsPath = (config) => join(config.dataDir, "herdr.json");
-const tokenNames = ["xroam_host", "xroam_tab", "xroam_state", "xroam_elapsed", "xroam_query1", "xroam_query2", "xroam_running", "xroam_activity"];
+const tokenNames = ["hati_host", "hati_tab", "hati_state", "hati_elapsed", "hati_query1", "hati_query2", "hati_running", "hati_activity"];
 
 // Herdr 0.7.x serves one request per connection. Socket identity detects restarts.
 export class HerdrRPC {
@@ -161,11 +161,11 @@ export function agentTokens(agent, summary, observation, now, host, tab) {
   }
   const query = queryRows(summary?.query || "指示未取得");
   return {
-    xroam_host: cleanText(host).slice(0, 80), xroam_tab: `↳ ${cleanText(tab || agent.tab_id)}`.slice(0, 80),
-    xroam_state: ({ working: "実行中", blocked: "確認待ち", idle: "待機中", done: "完了", unknown: "状態不明" })[agent.agent_status] ?? "状態不明",
-    xroam_elapsed: elapsedText(duration, estimated), xroam_query1: query[0], xroam_query2: query[1],
-    xroam_running: running ? "1" : "0",
-    xroam_activity: String(Math.max(summary?.activityAt ?? 0, observation.activityAt ?? 0)).padStart(16, "0"),
+    hati_host: cleanText(host).slice(0, 80), hati_tab: `↳ ${cleanText(tab || agent.tab_id)}`.slice(0, 80),
+    hati_state: ({ working: "実行中", blocked: "確認待ち", idle: "待機中", done: "完了", unknown: "状態不明" })[agent.agent_status] ?? "状態不明",
+    hati_elapsed: elapsedText(duration, estimated), hati_query1: query[0], hati_query2: query[1],
+    hati_running: running ? "1" : "0",
+    hati_activity: String(Math.max(summary?.activityAt ?? 0, observation.activityAt ?? 0)).padStart(16, "0"),
   };
 }
 
@@ -204,8 +204,8 @@ export class HerdrBridge {
     const agents = snapshot.agents;
     if (this.viewGeneration !== this.rpc.generation) {
       // Set once per server; repeated sets reset Herdr's sidebar scroll position.
-      await this.rpc.call("agent.view.set", { source: HERDR_SOURCE, label: "xroam · all", sort: [
-        { field: { token: "xroam_running" }, order: "desc" }, { field: { token: "xroam_activity" }, order: "desc" },
+      await this.rpc.call("agent.view.set", { source: HERDR_SOURCE, label: "hati · all", sort: [
+        { field: { token: "hati_running" }, order: "desc" }, { field: { token: "hati_activity" }, order: "desc" },
         { field: "state_change_seq", order: "desc" }, { field: "pane_order", order: "asc" },
       ] });
       this.viewGeneration = this.rpc.generation; this.sent.clear();

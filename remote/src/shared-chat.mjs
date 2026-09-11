@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import { check, requestID, textInput, now } from "./config.mjs";
+import { check, requestID, textInput, now, migrationCwd } from "./config.mjs";
 import { threadState } from "./workspace.mjs";
 import { permissionOverrides } from "./agent-settings.mjs";
 import { messageInput } from "./attachments.mjs";
@@ -33,8 +33,8 @@ export class SharedChat {
     this.locks = new Map();
   }
   record(id) {
-    const t = this.workspace.records().find((t) => t.id === id && t.threadId);
-    check(t, "chat_unavailable", "この端末はチャット未連携です。ターミナルから操作してください。", 404);
+    const t = this.workspace.record(id);
+    check(t?.threadId, "chat_unavailable", "この端末はチャット未連携です。ターミナルから操作してください。", 404);
     return t;
   }
   requests(id) {
@@ -49,8 +49,9 @@ export class SharedChat {
   }
   onMessage(m, client) {
     const threadId = m.params?.threadId;
-    const t = this.workspace.records().find((t) => t.threadId === threadId);
-    if (!t) return;
+    const t = this.workspace.recordForThread(threadId);
+    if (!t || t.closedAt) return;
+    this.store.progress.observe(t, m);
     if ([
       "item/started",
       "item/completed",
@@ -79,13 +80,16 @@ export class SharedChat {
         if (a.client === client && a.rpcId === m.params.requestId) this.approvals.delete(id);
     }
   }
+  async readStatus(c, threadId) {
+    return (await c.call("thread/read", { threadId, includeTurns: false }, 8000)).thread;
+  }
   async readThread(c, threadId) {
     try { return (await c.call("thread/read", { threadId, includeTurns: true }, 8000)).thread; }
     catch (e) {
       if (e.code !== "codex_rejected") throw e;
       if (e.message.includes("not materialized yet")) {
         const { thread } = await c.call("thread/read", { threadId, includeTurns: false }, 8000);
-        Object.defineProperty(thread, "_xroamHistoryLimited", { value: true });
+        Object.defineProperty(thread, "_hatiHistoryLimited", { value: true });
         return thread;
       }
       if (!e.message.includes("list_turns is not supported yet")) throw e;
@@ -93,7 +97,7 @@ export class SharedChat {
       // 0.153.4 can create paginated histories while its list API is unavailable.
       // Read only the registered thread's structured rollout; never parse terminal text.
       const fallback = { ...thread, turns: await readRolloutTurns(thread) };
-      Object.defineProperty(fallback, "_xroamRolloutFallback", { value: true });
+      Object.defineProperty(fallback, "_hatiRolloutFallback", { value: true });
       return fallback;
     }
   }
@@ -116,7 +120,7 @@ export class SharedChat {
     for (const turn of thread.turns ?? []) {
       const turnItems = [];
       const anchors = [];
-      const fallback = this.reconcileFallbackMessages(turn, persisted, !!thread._xroamRolloutFallback);
+      const fallback = this.reconcileFallbackMessages(turn, persisted, !!thread._hatiRolloutFallback);
       // A reconstructed snapshot can have been persisted while its turn was live.
       // Once a real event supplies the canonical id, remove that private row
       // so it cannot be appended after the reconciled item below.
@@ -141,7 +145,7 @@ export class SharedChat {
         if ((previous || turn.status === "inProgress") && activityNeedsSave(previous, next)) {
           // Keep snapshot provenance so a later live event can retire this
           // synthetic observation. It is stripped before public API output.
-          const saved = (thread._xroamRolloutFallback || legacyMessageID(item.id)) && !previous
+          const saved = (thread._hatiRolloutFallback || legacyMessageID(item.id)) && !previous
             ? { ...next, fallbackSynthetic: true } : next;
           this.saveStoredItem(t, key, saved);
         }
@@ -166,12 +170,15 @@ export class SharedChat {
     // its snapshot is newer than the known turns, so it belongs at the tail.
     items.push(...[...remaining.values()].map(publicConversationItem));
     const positioned = items.map((item, index) => ({ ...item, position: index + 1 }));
+    const current = this.record(id);
+    this.store.progress.reconcile(current, thread.turns?.at(-1));
     return {
       session: { id, name: t.name, projectId: "", threadId: t.threadId,
         turnId: thread.turns?.at(-1)?.id ?? null, state: threadState(thread, t.state),
         model: thread.model ?? t.model ?? null, effort: thread.reasoningEffort ?? t.effort ?? null, mode: "default", error: thread.turns?.at(-1)?.error?.message ?? null,
         permissionLevel: t.permissionLevel ?? null,
         runTiming: runTiming(thread.turns?.at(-1), t.runTiming),
+        runProgress: this.store.progress.summary({ ...current, turnId: thread.turns?.at(-1)?.id ?? current.turnId }),
         archived: t.archived, latest: t.latest, updatedAt: t.updatedAt, createdAt: t.updatedAt, lastEventSeq: 0 },
       items: positioned.filter((i) => i.position < before).slice(-200),
       approvals: [...this.approvals.values()].filter((a) => a.sessionId === id && a.client === c && a.status === "pending")
@@ -280,6 +287,7 @@ export class SharedChat {
         this.store.claim(body.requestId, id, kind, body);
         return this.store.request(body.requestId);
       }
+      check(!t.closedAt && !t.closeRequestId, "tab_closed", "タブは終了済み、または終了中です。履歴から再開してください。", 409);
       check((!t.pathTab && body.expectedThreadId === undefined) || body.expectedThreadId === t.threadId, "stale_thread", "会話が切り替わりました。再同期してください。", 409);
       const c = await this.workspace.shared();
       check(c?.alive, "codex_offline", "共有Codexに再接続してください。", 503);
@@ -297,6 +305,7 @@ export class SharedChat {
         } else check(!body.effort, "effort", "モデルを先に選んでください。");
         method = "turn/start";
         params = { threadId: t.threadId, clientUserMessageId: body.requestId, input,
+          ...migrationCwd(this.workspace.config, thread.cwd),
           ...permissionOverrides(body.permissionLevel ?? t.permissionLevel),
           ...(body.model ? { model: body.model } : {}), ...(body.effort ? { effort: body.effort } : {}) };
       } else if (action === "steer") {

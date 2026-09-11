@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID, createHash } from "node:crypto";
 import { now, json, check } from "./config.mjs";
+import { RunProgress } from "./run-progress.mjs";
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -32,6 +33,7 @@ export class Store {
     this.db
       .prepare("INSERT OR IGNORE INTO meta VALUES (?,?)")
       .run("serverId", randomUUID());
+    this.progress = new RunProgress(this.db);
   }
   get serverId() {
     return this.db.prepare("SELECT value FROM meta WHERE key=?").get("serverId")
@@ -52,7 +54,7 @@ export class Store {
     return this.db
       .prepare(`SELECT s.data, (SELECT i.data FROM items i WHERE i.session=s.id AND json_extract(i.data,'$.kind')='userMessage' ORDER BY i.position DESC LIMIT 1) AS last_user FROM sessions s`)
       .all()
-      .map((r) => ({ ...JSON.parse(r.data), lastUserQuery: r.last_user ? JSON.parse(r.last_user).text?.trim().slice(0, 1000) || "添付のみのメッセージ" : "" }));
+      .map((r) => this.progress.attach({ ...JSON.parse(r.data), lastUserQuery: r.last_user ? JSON.parse(r.last_user).text?.trim().slice(0, 1000) || "添付のみのメッセージ" : "" }));
   }
   session(id) {
     const r = this.db.prepare("SELECT data FROM sessions WHERE id=?").get(id);
@@ -60,11 +62,12 @@ export class Store {
     return JSON.parse(r.data);
   }
   saveSession(s) {
+    const { runProgress, ...stored } = s;
     this.db
       .prepare(
         "INSERT INTO sessions VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
       )
-      .run(s.id, json(s));
+      .run(s.id, json(stored));
   }
   items(session, before = Number.MAX_SAFE_INTEGER, limit = 200) {
     return this.db
@@ -222,13 +225,13 @@ export class Store {
       const payload = {
         aps: {
           alert: {
-            title: "xroam",
+            title: "Hati",
             body: `${projectName} · ${session.name} · ${status}`.slice(0, 220),
           },
           sound: "default",
           "thread-id": session.id,
         },
-        xroam: {
+        hati: {
           serverId: this.serverId,
           hostId: d.host,
           sessionId: session.id,

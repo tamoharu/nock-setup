@@ -64,10 +64,20 @@ export function createAPI(service, worker, config) {
           protocol: 1,
           version,
           serverId: store.serverId,
+          instanceId: service.diagnostics?.instanceId,
+          startedAt: service.diagnostics?.startedAt,
           codexVersion: "0.153.4",
-          capabilities: { agentPermissions: true, messageQueue: true, messageQueueEditing: true, steer: true, attachments: true, spaceManagement: true, workspaceBranches: true, workspaceBranchCreation: true, codeBrowser: true, globalSearch: true, herdrAgents: !!service.herdr },
+          capabilities: { powerSettings: !!service.power, agentPermissions: true, messageQueue: true, messageQueueEditing: true, steer: true, attachments: true, spaceManagement: true, workspacePresentation: true, tabProcessClose: true, workspaceBranches: true, workspaceBranchCreation: true, codeBrowser: true, globalSearch: true, herdrAgents: !!service.herdr },
           time: now(),
         };
+      else if (req.method === "GET" && u.pathname === "/v1/diagnostics") {
+        check(service.diagnostics, "diagnostics_unavailable", "接続先のHatiを更新すると接続履歴を確認できます。", 409);
+        value = await service.diagnostics.status();
+      }
+      else if (u.pathname === "/v1/power" && ["GET", "POST"].includes(req.method)) {
+        check(service.power, "power_unsupported", "PC側のhatiを更新してください。", 409);
+        value = req.method === "GET" ? service.power.status() : service.power.mutate(body);
+      }
       else if (req.method === "GET" && u.pathname === "/v1/herdr")
         value = service.herdr?.status() ?? { enabled: false, connected: false };
       else if (req.method === "POST" && u.pathname === "/v1/herdr/reload")
@@ -106,6 +116,10 @@ export function createAPI(service, worker, config) {
           sessions: store.sessions(), notifications: worker.status(), workspace: await service.workspace?.refreshLayout(), syncedAt: now() };
       else if (req.method === "GET" && u.pathname === "/v1/workspace")
         value = await service.workspace?.refreshLayout();
+      else if (req.method === "GET" && u.pathname === "/v1/workspace/presentation")
+        value = service.workspace.presentation.read();
+      else if (req.method === "POST" && u.pathname === "/v1/workspace/presentation")
+        value = service.workspace.presentation.mutate(body);
       else if (req.method === "GET" && u.pathname === "/v1/search") {
         const abort = new AbortController();
         res.on("close", () => abort.abort());
@@ -115,6 +129,10 @@ export function createAPI(service, worker, config) {
         value = await service.workspace.code.read(null, u.searchParams.get("path") ?? "", u.searchParams.get("directory"));
       else if (req.method === "POST" && u.pathname === "/v1/workspace/tabs")
         value = await service.workspace?.create(body);
+      else if (req.method === "POST" && path.length === 5 && path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && path[4] === "close")
+        value = await service.workspace.lifecycle.close(decodeURIComponent(path[3]), body);
+      else if (req.method === "POST" && path.length === 5 && path[0] === "v1" && path[1] === "workspace" && path[2] === "tabs" && path[4] === "archive")
+        value = await service.workspace.archiveTab(decodeURIComponent(path[3]), body);
       else if (req.method === "PATCH" && path.length === 4 && path[0] === "v1" && path[1] === "workspace" && path[2] === "spaces")
         value = await service.workspace.updateSpace(decodeURIComponent(path[3]), body);
       else if (req.method === "GET" && u.pathname === "/v1/workspace/directories")

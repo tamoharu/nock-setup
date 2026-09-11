@@ -2,7 +2,7 @@ import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, isAbsolute, relative } from "node:path";
 import { threadPermissionOverrides } from "./agent-settings.mjs";
-import { check, requestID, now } from "./config.mjs";
+import { check, requestID, now, migratedDirectory, historyDirectories, migrationCwd } from "./config.mjs";
 import { EMPTY_THREAD_NAME } from "./thread-titles.mjs";
 import { repositoryContext, branchDirectory, createBranch } from "./workspace-git.mjs";
 import { conversationSummary } from "./workspace.mjs";
@@ -97,7 +97,7 @@ export class PathTabs {
     const t = this.w.snapshot.spaces.flatMap((s) => s.tabs).find((t) => t.id === id) ?? this.w.records().find((t) => t.id === id);
     check(t, "tab_missing", "タブが見つかりません。", 404);
     const c = await this.w.shared(true);
-    const result = await c.call("thread/list", { cwd: t.directory, limit: 40, sortKey: "updated_at", cursor: cursor || null,
+    const result = await c.call("thread/list", { cwd: historyDirectories(this.w.config, t.directory), limit: 40, sortKey: "updated_at", cursor: cursor || null,
       sourceKinds: ["cli", "vscode", "appServer", "exec", "unknown"], modelProviders: [] });
     // Empty newly created threads may not yet appear in the persisted list.
     if (!cursor) {
@@ -112,7 +112,7 @@ export class PathTabs {
       }
     }
     // Also update placeholder titles for conversations switched away from or archived
-    // in xroam. Ordinary CLI history and custom names are left alone.
+    // in hati. Ordinary CLI history and custom names are left alone.
     for (let i = 0; i < result.data.length; i++) {
       try { result.data[i] = await this.w.titles.update(c, result.data[i]); }
       catch { /* History remains usable if Codex cannot save a name yet. */ }
@@ -134,6 +134,7 @@ export class PathTabs {
       }
       const old = id ? this.w.records().find((t) => t.id === id) ?? this.w.snapshot.spaces.flatMap((s) => s.tabs).find((t) => t.id === id) : null;
       check(!id || old, "tab_missing", "タブが見つかりません。", 404);
+      check(!old?.closeRequestId, "tab_closing", "タブの終了結果を確認してから再開してください。", 409);
       // Opening a shared conversation selects its existing tab, even during a turn.
       // Do not replace the current tab or create a second owner of the thread.
       if (body.threadId) {
@@ -176,7 +177,7 @@ export class PathTabs {
       if (selectedThread) {
         check(typeof selectedThread === "string" && selectedThread.length < 200, "thread", "会話の指定が不正です。");
         thread = await this.w.chat.readThread(c, selectedThread);
-        check(await directoryPath(thread.cwd) === directory, "thread_directory", "このパスの履歴を選んでください。", 409);
+        check(await directoryPath(migratedDirectory(this.w.config, thread.cwd)) === directory, "thread_directory", "このパスの履歴を選んでください。", 409);
         check(thread.status?.type !== "active", "busy", "この会話は実行中です。", 409);
         check(!this.w.records().some((t) => t.id !== key && t.threadId === selectedThread && !t.archived),
           "thread_open", "この会話は別のタブで開いています。", 409);
@@ -187,7 +188,7 @@ export class PathTabs {
         if (body.branch != null) directory = await branchDirectory(directory, body.branch, this.w.config.dataDir);
         preparingBranch = false;
         if (thread) {
-          const resumed = (await c.call("thread/resume", { threadId: thread.id, ...threadPermissionOverrides(body.permissionLevel) })).thread;
+          const resumed = (await c.call("thread/resume", { threadId: thread.id, ...migrationCwd(this.w.config, directory), ...threadPermissionOverrides(body.permissionLevel) })).thread;
           thread = { ...resumed, turns: resumed.turns?.length ? resumed.turns : thread.turns };
         }
         else {
@@ -203,9 +204,10 @@ export class PathTabs {
         let pane = contexts.find((p) => p.directory === directory && panes.some((live) =>
           live.paneId === p.paneId && live.panePid === p.panePid && live.epoch === p.epoch && !live.dead));
         if (!pane) {
-          const sessionId = panes.find((p) => p.sessionId === old?.sessionId && p.epoch === old?.epoch)?.sessionId ?? space?.sessionId;
+          const sessionId = panes.find((p) => p.sessionId === old?.sessionId && p.epoch === old?.epoch)?.sessionId ??
+            panes.find((p) => p.sessionId === space?.sessionId && p.epoch === space?.epoch)?.sessionId;
           const paneId = await this.w.tmux.create({ space: sessionId,
-            name: `xroam-${body.requestId.slice(0, 8)}`, directory });
+            name: `hati-${body.requestId.slice(0, 8)}`, directory });
           pane = (await this.w.tmux.panes()).find((p) => p.paneId === paneId);
         }
         check(pane, "terminal_unknown", "端末の作成結果を確認できません。", 503);
@@ -218,7 +220,7 @@ export class PathTabs {
         const tab = { ...compact(pane), id: key, name: customName ?? tabNumber, tabNumber, customName, directory,
           pathTab: true, baseDirectory: old?.baseDirectory ?? old?.directory ?? space?.baseDirectory ?? space?.directory ?? baseDirectory, threadId: thread.id, permissionLevel: selectedThread ? body.permissionLevel ?? remembered?.permissionLevel ?? null : permissionLevel || null, model: thread.model, effort: thread.reasoningEffort, history,
           contexts: contexts.filter((p, i) => p.directory !== directory && contexts.findIndex((v) => v.directory === p.directory) === i).map(compact),
-          ...conversationSummary(thread), archived: false, updatedAt: now(), lastPathRequest: body.requestId };
+          ...conversationSummary(thread), archived: false, closedAt: null, closeRequestId: null, updatedAt: now(), lastPathRequest: body.requestId };
         this.w.save(tab);
         const receipt = this.w.store.finishRequest(body.requestId, "accepted", { tabId: key, threadId: thread.id });
         await this.w.refreshLayout();
@@ -229,26 +231,27 @@ export class PathTabs {
     });
   }
   async openExisting(target, requestId) {
+    check(!target.closeRequestId, "tab_closing", "タブの終了結果を確認してから再開してください。", 409);
     const c = await this.w.shared(true);
     let thread = await this.w.chat.readThread(c, target.threadId);
     const panes = await this.w.tmux.panes();
     let pane = panes.find((p) => p.paneId === target.paneId && p.panePid === target.panePid && p.epoch === target.epoch && !p.dead);
     if (!pane) {
       const directory = await directoryPath(target.directory);
-      const resumed = (await c.call("thread/resume", { threadId: target.threadId })).thread;
+      const resumed = (await c.call("thread/resume", { threadId: target.threadId, ...migrationCwd(this.w.config, directory) })).thread;
       thread = { ...resumed, turns: resumed.turns?.length ? resumed.turns : thread.turns };
       // A path tab uses native chat plus a shell. Legacy shared CLI tabs also
       // restore their Codex TUI. Never respawn into a reused tmux pane ID.
       const command = target.pathTab ? undefined
         : [this.w.config.codexBin, "resume", "--no-alt-screen", "--remote", `unix://${this.w.socket}`, target.threadId];
       const space = panes.find((p) => p.sessionId === target.sessionId && p.epoch === target.epoch)?.sessionId;
-      const paneId = await this.w.tmux.create({ space, name: `xroam-${requestId.slice(0, 8)}`, directory, command });
+      const paneId = await this.w.tmux.create({ space, name: `hati-${requestId.slice(0, 8)}`, directory, command });
       pane = (await this.w.tmux.panes()).find((p) => p.paneId === paneId && !p.dead);
       check(pane, "terminal_unknown", "端末の作成結果を確認できません。", 503);
     }
     const current = this.w.records().find((t) => t.id === target.id);
     check(current?.threadId === target.threadId, "stale_thread", "会話が切り替わりました。再同期してください。", 409);
     this.w.save({ ...current, ...pane, directory: target.pathTab ? target.directory : pane.directory,
-      ...conversationSummary(thread, current), archived: false, updatedAt: now() });
+      ...conversationSummary(thread, current), archived: false, closedAt: null, closeRequestId: null, updatedAt: now() });
   }
 }

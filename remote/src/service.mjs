@@ -14,6 +14,8 @@ import {
   textInput,
   Fault,
   loadConfig,
+  migratedDirectory,
+  historyDirectories,
 } from "./config.mjs";
 
 const busy = (s) => ["running", "waiting", "starting"].includes(s.state);
@@ -503,7 +505,7 @@ export class Service {
           error: {
             code: -32601,
             message:
-              "xroam does not support this request. No approval was granted.",
+              "hati does not support this request. No approval was granted.",
           },
         });
         this.store.event(id, "unsupported_request", { method: m.method });
@@ -556,8 +558,9 @@ export class Service {
     }
     if (p.turnId && s.turnId && p.turnId !== s.turnId) return;
     this.store.transaction(() => {
+      this.store.progress.observe(s, m);
       if (m.method === "turn/started") {
-        // Only xroam owns this app-server, and send() serializes one dispatch
+        // Only hati owns this app-server, and send() serializes one dispatch
         // per session. Bind the start event to that journal entry, not to a
         // guessed equality between public item IDs and clientUserMessageId.
         const receipt =
@@ -683,7 +686,9 @@ export class Service {
       });
     if (turns.length) {
       const s = this.store.session(id);
-      this.store.saveSession({ ...s, runTiming: runTiming(turns.at(-1), s.runTiming) });
+      const current = { ...s, runTiming: runTiming(turns.at(-1), s.runTiming) };
+      this.store.saveSession(current);
+      this.store.progress.reconcile(current, turns.at(-1));
     }
   }
   freezeTurnItems(id, turn, observedAt) {
@@ -725,7 +730,7 @@ export class Service {
   detail(id, before, limit) {
     const s = this.store.session(id);
     return {
-      session: s,
+      session: this.store.progress.attach(s),
       items: this.store.items(id, before, limit).map(publicConversationItem),
       approvals: this.store.pending(id),
       requests: this.store.db
@@ -761,7 +766,7 @@ export class Service {
     } catch (e) {
       if (e.code !== "codex_rejected" || !e.message.includes("not materialized yet")) throw e;
       child = (await c.call("thread/read", { threadId: agentThreadId, includeTurns: false })).thread;
-      Object.defineProperty(child, "_xroamHistoryLimited", { value: true });
+      Object.defineProperty(child, "_hatiHistoryLimited", { value: true });
     }
     check(this.store.session(id).threadId === expectedThreadId, "stale_thread", "会話が変更されました。再同期してください。", 409);
     check(child?.id === agentThreadId, "subagent_reference", "この会話に属するサブエージェントではありません。", 404);
@@ -782,23 +787,31 @@ export class Service {
   }
   async readHistory(threadId) {
     const c = await this.control();
-    const result = await c.call("thread/read", {
+    const result = this.workspace ? { thread: await this.workspace.chat.readThread(c, threadId) } : await c.call("thread/read", {
       threadId,
       includeTurns: true,
     });
     check(
-      this.config.projects.some((p) => p.path === result.thread.cwd),
+      this.config.projects.some((p) => p.path === migratedDirectory(this.config, result.thread.cwd)),
       "history_scope",
       "登録プロジェクト外の履歴です。",
       403,
     );
+    // Rollout fallback messages carry text directly; the PC history screen
+    // consumes the protocol's userMessage.content representation.
+    for (const turn of result.thread.turns ?? []) {
+      for (const item of turn.items ?? []) {
+        if (item.type === "userMessage" && !Array.isArray(item.content) && typeof item.text === "string")
+          item.content = [{ type: "text", text: item.text }];
+      }
+    }
     return result;
   }
   async history(projectId, cursor) {
     const p = this.project(projectId);
     const c = await this.control();
     return c.call("thread/list", {
-      cwd: p.path,
+      cwd: historyDirectories(this.config, p.path),
       cursor: cursor ?? null,
       limit: 30,
       sortKey: "updated_at",
@@ -807,6 +820,7 @@ export class Service {
   async reconcileRequest(id) {
     const r = this.store.request(id);
     check(r, "request_missing", "要求が見つかりません。", 404);
+    if (r.kind === "tab:close" && ["unknown", "dispatching"].includes(r.status)) return this.workspace.lifecycle.reconcile(id);
     if (r.status !== "unknown" || r.kind !== "turn") return r;
     const s = this.store.session(r.sessionId);
     if (s.threadId) {
